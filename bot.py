@@ -11,12 +11,14 @@ import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "YOUR_API_FOOTBALL_KEY")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 HEALTH_CHECK_PORT = int(os.getenv("PORT", "8000"))
-CURRENT_SEASON = 2025-2026
+CURRENT_SEASON = 2025  # Fixed: was 2025-2026 which evaluated to -1
+
 
 # League IDs
 LEAGUES = {
@@ -28,6 +30,7 @@ LEAGUES = {
     'ligue1': {'id': 61, 'name': 'Ligue 1', 'emoji': '🇫🇷'}
 }
 
+
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,9 +38,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # Data storage
 player_history: Dict[int, Dict] = {}
-user_preferences: Dict[int, Set[str]] = {}  # user_id -> set of league codes
+user_preferences: Dict[int, Set[str]] = {}
+
 
 POSITION_MAP = {
     'G': 'Goalkeeper',
@@ -45,6 +50,7 @@ POSITION_MAP = {
     'M': 'Midfielder',
     'F': 'Forward'
 }
+
 
 # Health check server
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -57,14 +63,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+
 def run_health_server():
-    """Run health check server in background"""
     server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthCheckHandler)
     logger.info(f"Health check server running on port {HEALTH_CHECK_PORT}")
     server.serve_forever()
 
+
 class PlayerStats:
-    """Store and analyze player statistics"""
     def __init__(self, player_id: int, name: str):
         self.player_id = player_id
         self.name = name
@@ -127,8 +133,8 @@ class PlayerStats:
         
         return impact
 
+
 async def get_api_football_data(endpoint: str, params: Dict = None, retries: int = 3):
-    """Make request to API-Football"""
     headers = {'x-apisports-key': API_FOOTBALL_KEY}
     url = f"{API_FOOTBALL_BASE}/{endpoint}"
     
@@ -149,8 +155,8 @@ async def get_api_football_data(endpoint: str, params: Dict = None, retries: int
                 await asyncio.sleep(5)
     return None
 
+
 async def build_player_history(team_id: int, season: int = CURRENT_SEASON):
-    """Build historical position data"""
     logger.info(f"Building player history for team {team_id}")
     
     params = {
@@ -191,8 +197,8 @@ async def build_player_history(team_id: int, season: int = CURRENT_SEASON):
         
         await asyncio.sleep(0.5)
 
+
 async def get_player_statistics(player_id: int, season: int = CURRENT_SEASON):
-    """Get player stats"""
     params = {'id': player_id, 'season': season}
     data = await get_api_football_data('players', params)
     
@@ -234,8 +240,8 @@ async def get_player_statistics(player_id: int, season: int = CURRENT_SEASON):
         'shots_per_90': round(total_shots / matches_90, 2) if matches_90 > 0 else 0
     }
 
+
 async def get_upcoming_matches(league_codes: List[str] = ['pl'], hours_ahead: int = 168):
-    """Get upcoming matches for specified leagues"""
     today = datetime.now()
     future = today + timedelta(hours=hours_ahead)
     
@@ -260,14 +266,13 @@ async def get_upcoming_matches(league_codes: List[str] = ['pl'], hours_ahead: in
                 match['league_code'] = code
                 all_matches.append(match)
         
-        await asyncio.sleep(0.3)  # Rate limiting
+        await asyncio.sleep(0.3)
     
-    # Sort by date
     all_matches.sort(key=lambda x: x['fixture']['date'])
     return all_matches
 
+
 async def analyze_lineup_detailed(fixture_id: int, match_info: Dict) -> Optional[Dict]:
-    """Analyze lineup for opportunities"""
     params = {'fixture': fixture_id}
     data = await get_api_football_data('fixtures/lineups', params)
     
@@ -358,8 +363,8 @@ async def analyze_lineup_detailed(fixture_id: int, match_info: Dict) -> Optional
     
     return analysis if analysis['opportunities'] else None
 
+
 def format_detailed_analysis(analysis: Dict) -> str:
-    """Format analysis message"""
     msg = f"🚨 **BETTING OPPORTUNITY DETECTED** 🚨\n\n"
     msg += f"🏆 **{analysis['league']}**\n"
     msg += f"⚽ **{analysis['home_team']} vs {analysis['away_team']}**\n"
@@ -387,11 +392,11 @@ def format_detailed_analysis(analysis: Dict) -> str:
     msg += "⚠️ *Always gamble responsibly. These are analytical insights, not guarantees.*"
     return msg
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start"""
     user_id = update.effective_user.id
     if user_id not in user_preferences:
-        user_preferences[user_id] = {'pl', 'ucl'}  # Default leagues
+        user_preferences[user_id] = {'pl', 'ucl'}
     
     await update.message.reply_text(
         "⚽ **Football Position Analyzer Bot**\n\n"
@@ -412,8 +417,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ Default: Premier League + Champions League"
     )
 
+
 async def leagues_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show available leagues"""
     user_id = update.effective_user.id
     if user_id not in user_preferences:
         user_preferences[user_id] = {'pl', 'ucl'}
@@ -430,13 +435,12 @@ async def leagues_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(msg)
 
+
 async def next_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show upcoming matches"""
     user_id = update.effective_user.id
     if user_id not in user_preferences:
         user_preferences[user_id] = {'pl', 'ucl'}
     
-    # Check if specific league requested
     if context.args:
         league_code = context.args[0].lower()
         if league_code in LEAGUES:
@@ -458,7 +462,7 @@ async def next_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📅 **Upcoming Matches:**\n\n"
     current_league = None
     
-    for match in matches[:20]:  # Limit to 20 matches
+    for match in matches[:20]:
         league_code = match.get('league_code', 'pl')
         league_info = LEAGUES.get(league_code, LEAGUES['pl'])
         
@@ -480,8 +484,8 @@ async def next_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\n💡 Use `/check [ID]` to analyze a match"
     await update.message.reply_text(msg)
 
+
 async def league_specific_matches(update: Update, context: ContextTypes.DEFAULT_TYPE, league_code: str):
-    """Show matches for specific league"""
     if league_code not in LEAGUES:
         await update.message.reply_text("❌ League not found")
         return
@@ -513,8 +517,8 @@ async def league_specific_matches(update: Update, context: ContextTypes.DEFAULT_
     msg += "💡 Use `/check [ID]` to analyze"
     await update.message.reply_text(msg)
 
+
 async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show today's matches"""
     user_id = update.effective_user.id
     if user_id not in user_preferences:
         user_preferences[user_id] = {'pl', 'ucl'}
@@ -564,8 +568,8 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\n💡 Use `/check [ID]` when lineups drop!"
     await update.message.reply_text(msg)
 
+
 async def check_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analyze specific match"""
     if not context.args:
         await update.message.reply_text(
             "⚠️ Please provide a match ID\n\n"
@@ -609,8 +613,8 @@ async def check_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💡 Lineups usually drop 60-90min before kickoff!"
         )
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show help"""
     await update.message.reply_text(
         "⚽ **Football Position Analyzer Bot**\n\n"
         "**Commands:**\n"
@@ -638,29 +642,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ Gamble responsibly!"
     )
 
+
 def main():
-    """Start bot"""
     logger.info("Starting Football Position Analyzer Bot...")
     
-    # Start health check server
     health_thread = Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("✅ Health check server started")
     
-    # Start Telegram bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Basic commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("leagues", leagues_command))
     
-    # Match commands
     application.add_handler(CommandHandler("next", next_matches))
     application.add_handler(CommandHandler("today", today_matches))
     application.add_handler(CommandHandler("check", check_match))
     
-    # League-specific commands
     application.add_handler(CommandHandler("pl", lambda u, c: league_specific_matches(u, c, 'pl')))
     application.add_handler(CommandHandler("ucl", lambda u, c: league_specific_matches(u, c, 'ucl')))
     application.add_handler(CommandHandler("laliga", lambda u, c: league_specific_matches(u, c, 'laliga')))
@@ -670,6 +669,7 @@ def main():
     
     logger.info("✅ Telegram bot started! Waiting for commands...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == '__main__':
     main()
