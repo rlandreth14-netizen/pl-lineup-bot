@@ -1,56 +1,63 @@
 import os
 import asyncio
 import logging
-import aiohttp
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Configuration - CHECK THESE IN YOUR HOSTING DASHBOARD
+# --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
+PORT = int(os.getenv("PORT", 8000))  # Koyeb uses port 8000 by default
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-async def debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """This function tests the raw connection and reports exactly what is wrong."""
-    
-    if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "YOUR_API_FOOTBALL_KEY":
-        await update.message.reply_text("❌ ERROR: API Key is missing or set to default placeholder in Environment Variables.")
-        return
+# --- KOYEB HEALTH CHECK WORKAROUND ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Answers Koyeb's pings so the bot doesn't get killed."""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is Healthy")
 
-    headers = {'x-apisports-key': API_FOOTBALL_KEY}
-    url = f"{API_FOOTBALL_BASE}/status" # Simple endpoint to check key health
-    
-    await update.message.reply_text(f"Attempting to contact: {url}\nKey (masked): {API_FOOTBALL_KEY[:5]}***")
+    def log_message(self, format, *args):
+        return # Keeps logs clean from constant pings
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                status = response.status
-                text = await response.text()
-                
-                if status == 200:
-                    await update.message.reply_text(f"✅ SUCCESS! API reached.\nResponse: {text[:100]}")
-                else:
-                    await update.message.reply_text(f"⚠️ API responded with Error {status}.\nBody: {text}")
-    except Exception as e:
-        await update.message.reply_text(f"🔥 CRITICAL ERROR: Could not even reach the API server.\nDetails: {str(e)}")
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    logger.info(f"Health check server started on port {PORT}")
+    server.serve_forever()
 
+# --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot is alive! Use /debug_api to see why the API isn't responding.")
+    await update.message.reply_text("✅ Bot is online and bypassing Koyeb health checks!")
 
+async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This is where your football API logic goes
+    await update.message.reply_text("Searching for live matches...")
+
+# --- MAIN ENGINE ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        print("No Telegram Token found!")
+        logger.error("No TELEGRAM_BOT_TOKEN found in environment variables!")
         return
 
+    # 1. Start the Health Server in a background thread
+    threading.Thread(target=run_health_server, daemon=True).start()
+
+    # 2. Start the Telegram Bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("debug_api", debug_api))
     
-    print("Bot is polling...")
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("live", live))
+
+    logger.info("Bot is starting polling...")
     application.run_polling()
 
 if __name__ == '__main__':
