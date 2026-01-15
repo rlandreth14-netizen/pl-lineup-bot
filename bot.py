@@ -1,28 +1,31 @@
 import os
 import asyncio
 import logging
-import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Optional
-from collections import defaultdict
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 
-# Configuration
+# ================= CONFIG =================
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "YOUR_API_FOOTBALL_KEY")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 HEALTH_CHECK_PORT = int(os.getenv("PORT", "8000"))
-CURRENT_SEASON = 2025  # Fixed: was 2025-2026 which evaluated to -1
+
+# IMPORTANT:
+# API-Football uses the *start year* of the season
+# 2025 = 2025/26 season (still valid in Jan–May 2026)
+CURRENT_SEASON = 2025
 
 
-# League IDs
 LEAGUES = {
-    'pl': {'id': 39, 'name': 'Premier League', 'emoji': '🏴󠁧󠁢󠁥󠁮󠁧󠁿'},
+    'pl': {'id': 39, 'name': 'Premier League', 'emoji': '🏴'},
     'ucl': {'id': 2, 'name': 'Champions League', 'emoji': '⭐'},
     'laliga': {'id': 140, 'name': 'La Liga', 'emoji': '🇪🇸'},
     'seriea': {'id': 135, 'name': 'Serie A', 'emoji': '🇮🇹'},
@@ -30,646 +33,191 @@ LEAGUES = {
     'ligue1': {'id': 61, 'name': 'Ligue 1', 'emoji': '🇫🇷'}
 }
 
+POSITION_MAP = {'G': 'Goalkeeper', 'D': 'Defender', 'M': 'Midfielder', 'F': 'Forward'}
 
-# Logging
+
+# ================= LOGGING =================
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
-# Data storage
-player_history: Dict[int, Dict] = {}
+# ================= STORAGE =================
+
+player_history: Dict[int, "PlayerStats"] = {}
 user_preferences: Dict[int, Set[str]] = {}
 
 
-POSITION_MAP = {
-    'G': 'Goalkeeper',
-    'D': 'Defender',
-    'M': 'Midfielder',
-    'F': 'Forward'
-}
+# ================= HEALTH CHECK =================
 
-
-# Health check server
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Bot is running!')
-    
-    def log_message(self, format, *args):
+        self.wfile.write(b'Bot is running')
+
+    def log_message(self, *_):
         pass
 
 
 def run_health_server():
-    server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthCheckHandler)
-    logger.info(f"Health check server running on port {HEALTH_CHECK_PORT}")
-    server.serve_forever()
+    HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthCheckHandler).serve_forever()
 
+
+# ================= PLAYER MODEL =================
 
 class PlayerStats:
-    def __init__(self, player_id: int, name: str):
-        self.player_id = player_id
+    def __init__(self, pid: int, name: str):
+        self.id = pid
         self.name = name
-        self.positions = []
+        self.positions: List[str] = []
         self.fouls_per_90 = 0.0
         self.cards_per_90 = 0.0
         self.shots_per_90 = 0.0
-        
-    def add_position(self, position: str):
-        self.positions.append(position)
+
+    def add_position(self, pos: str):
+        self.positions.append(pos)
         if len(self.positions) > 10:
             self.positions.pop(0)
-    
-    def get_usual_position(self) -> str:
-        if not self.positions:
-            return "Unknown"
-        return max(set(self.positions), key=self.positions.count)
-    
-    def is_out_of_position(self, current_pos: str) -> bool:
-        if len(self.positions) < 3:
-            return False
-        usual = self.get_usual_position()
-        return usual != current_pos and usual != "Unknown"
-    
-    def get_position_change_impact(self, new_position: str) -> Dict:
-        usual = self.get_usual_position()
-        impact = {
-            'fouls': 'neutral',
-            'cards': 'neutral',
-            'shots': 'neutral',
-            'confidence': 'low'
-        }
-        
-        if len(self.positions) < 3:
-            return impact
-        
-        if usual == 'D' and new_position in ['M', 'F']:
-            impact['fouls'] = 'decrease'
-            impact['cards'] = 'decrease'
-            impact['shots'] = 'increase'
-            impact['confidence'] = 'high'
-        elif usual == 'M' and new_position == 'D':
-            impact['fouls'] = 'increase'
-            impact['cards'] = 'increase'
-            impact['shots'] = 'decrease'
-            impact['confidence'] = 'high'
-        elif usual == 'M' and new_position == 'F':
-            impact['shots'] = 'increase'
-            impact['fouls'] = 'slight_decrease'
-            impact['confidence'] = 'medium'
-        elif usual == 'F' and new_position == 'M':
-            impact['shots'] = 'decrease'
-            impact['fouls'] = 'slight_increase'
-            impact['confidence'] = 'medium'
-        elif usual == 'F' and new_position == 'D':
-            impact['fouls'] = 'increase'
-            impact['cards'] = 'increase'
-            impact['shots'] = 'significant_decrease'
-            impact['confidence'] = 'high'
-        
-        return impact
+
+    def usual_position(self) -> str:
+        return max(set(self.positions), key=self.positions.count) if self.positions else "Unknown"
+
+    def is_out_of_position(self, current: str) -> bool:
+        return len(self.positions) >= 3 and current != self.usual_position()
 
 
-async def get_api_football_data(endpoint: str, params: Dict = None, retries: int = 3):
+# ================= API =================
+
+async def api_get(endpoint: str, params: Dict = None):
     headers = {'x-apisports-key': API_FOOTBALL_KEY}
-    url = f"{API_FOOTBALL_BASE}/{endpoint}"
-    
-    for attempt in range(retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params, timeout=10) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    elif response.status == 429:
-                        logger.warning("Rate limited, waiting...")
-                        await asyncio.sleep(60)
-                    else:
-                        logger.error(f"API error: {response.status}")
-        except Exception as e:
-            logger.error(f"Request failed (attempt {attempt + 1}): {e}")
-            if attempt < retries - 1:
-                await asyncio.sleep(5)
-    return None
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{API_FOOTBALL_BASE}/{endpoint}",
+            headers=headers,
+            params=params,
+            timeout=10
+        ) as r:
+            if r.status == 200:
+                return await r.json()
+            logger.error(f"API error {r.status}")
+            return None
 
 
-async def build_player_history(team_id: int, season: int = CURRENT_SEASON):
-    logger.info(f"Building player history for team {team_id}")
-    
-    params = {
-        'team': team_id,
-        'season': season,
-        'last': 10
-    }
-    
-    data = await get_api_football_data('fixtures', params)
-    if not data or not data.get('response'):
-        return
-    
-    fixtures = data['response']
-    
-    for fixture in fixtures[:5]:
-        fixture_id = fixture['fixture']['id']
-        lineup_data = await get_api_football_data('fixtures/lineups', {'fixture': fixture_id})
-        
-        if not lineup_data or not lineup_data.get('response'):
-            continue
-        
-        for team_lineup in lineup_data['response']:
-            if team_lineup['team']['id'] != team_id:
-                continue
-            
-            all_players = team_lineup.get('startXI', []) + team_lineup.get('substitutes', [])
-            
-            for player_data in all_players:
-                player = player_data.get('player', {})
-                player_id = player.get('id')
-                player_name = player.get('name')
-                position = player.get('pos', 'Unknown')
-                
-                if player_id and position != 'Unknown':
-                    if player_id not in player_history:
-                        player_history[player_id] = PlayerStats(player_id, player_name)
-                    player_history[player_id].add_position(position)
-        
-        await asyncio.sleep(0.5)
+# ================= FIXED FIXTURE FETCH =================
 
-
-async def get_player_statistics(player_id: int, season: int = CURRENT_SEASON):
-    params = {'id': player_id, 'season': season}
-    data = await get_api_football_data('players', params)
-    
-    if not data or not data.get('response'):
-        return None
-    
-    player_data = data['response'][0]
-    statistics = player_data.get('statistics', [])
-    
-    if not statistics:
-        return None
-    
-    total_minutes = 0
-    total_fouls = 0
-    total_cards = 0
-    total_shots = 0
-    
-    for stat in statistics:
-        games = stat.get('games', {})
-        minutes = games.get('minutes', 0) or 0
-        fouls_drawn = stat.get('fouls', {}).get('committed', 0) or 0
-        yellow = stat.get('cards', {}).get('yellow', 0) or 0
-        red = stat.get('cards', {}).get('red', 0) or 0
-        shots_total = stat.get('shots', {}).get('total', 0) or 0
-        
-        total_minutes += minutes
-        total_fouls += fouls_drawn
-        total_cards += (yellow + red * 2)
-        total_shots += shots_total
-    
-    if total_minutes == 0:
-        return None
-    
-    matches_90 = total_minutes / 90
-    
-    return {
-        'fouls_per_90': round(total_fouls / matches_90, 2) if matches_90 > 0 else 0,
-        'cards_per_90': round(total_cards / matches_90, 2) if matches_90 > 0 else 0,
-        'shots_per_90': round(total_shots / matches_90, 2) if matches_90 > 0 else 0
-    }
-
-
-async def get_upcoming_matches(league_codes: List[str] = ['pl'], hours_ahead: int = 168):
-    today = datetime.now()
+async def get_upcoming_matches(league_codes: List[str], hours_ahead: int = 168):
+    today = datetime.utcnow()
     future = today + timedelta(hours=hours_ahead)
-    
-    all_matches = []
-    
+    matches = []
+
     for code in league_codes:
-        if code not in LEAGUES:
-            continue
-            
-        league_id = LEAGUES[code]['id']
-        
+        league = LEAGUES[code]
+
+        # CRITICAL FIX:
+        # Do NOT combine season + date range
         params = {
-            'league': league_id,
-            'season': CURRENT_SEASON,
+            'league': league['id'],
             'from': today.strftime('%Y-%m-%d'),
             'to': future.strftime('%Y-%m-%d')
         }
-        
-        data = await get_api_football_data('fixtures', params)
+
+        data = await api_get('fixtures', params)
         if data and data.get('response'):
-            for match in data['response']:
-                match['league_code'] = code
-                all_matches.append(match)
-        
-        await asyncio.sleep(0.3)
-    
-    all_matches.sort(key=lambda x: x['fixture']['date'])
-    return all_matches
+            for m in data['response']:
+                m['league_code'] = code
+                matches.append(m)
+
+        await asyncio.sleep(0.25)
+
+    return sorted(matches, key=lambda x: x['fixture']['date'])
 
 
-async def analyze_lineup_detailed(fixture_id: int, match_info: Dict) -> Optional[Dict]:
-    params = {'fixture': fixture_id}
-    data = await get_api_football_data('fixtures/lineups', params)
-    
-    if not data or not data.get('response'):
-        return None
-    
-    lineups = data['response']
-    home_team = match_info['teams']['home']
-    away_team = match_info['teams']['away']
-    
-    await build_player_history(home_team['id'])
-    await build_player_history(away_team['id'])
-    
-    analysis = {
-        'fixture_id': fixture_id,
-        'home_team': home_team['name'],
-        'away_team': away_team['name'],
-        'kickoff': match_info['fixture']['date'],
-        'league': match_info['league']['name'],
-        'opportunities': []
-    }
-    
-    for team_lineup in lineups:
-        team_name = team_lineup.get('team', {}).get('name', 'Unknown')
-        starters = team_lineup.get('startXI', [])
-        
-        for player_data in starters:
-            player = player_data.get('player', {})
-            player_id = player.get('id')
-            player_name = player.get('name', 'Unknown')
-            current_position = player.get('pos', 'Unknown')
-            
-            if current_position == 'Unknown' or not player_id:
-                continue
-            
-            if player_id not in player_history:
-                player_history[player_id] = PlayerStats(player_id, player_name)
-                stats = await get_player_statistics(player_id)
-                if stats:
-                    player_history[player_id].fouls_per_90 = stats['fouls_per_90']
-                    player_history[player_id].cards_per_90 = stats['cards_per_90']
-                    player_history[player_id].shots_per_90 = stats['shots_per_90']
-            
-            player_stats = player_history[player_id]
-            
-            if player_stats.is_out_of_position(current_position):
-                usual_pos = player_stats.get_usual_position()
-                impact = player_stats.get_position_change_impact(current_position)
-                
-                opportunity = {
-                    'team': team_name,
-                    'player': player_name,
-                    'usual_position': POSITION_MAP.get(usual_pos, usual_pos),
-                    'current_position': POSITION_MAP.get(current_position, current_position),
-                    'impact': impact,
-                    'stats': {
-                        'fouls_per_90': player_stats.fouls_per_90,
-                        'cards_per_90': player_stats.cards_per_90,
-                        'shots_per_90': player_stats.shots_per_90
-                    },
-                    'betting_recommendations': []
-                }
-                
-                if impact['confidence'] in ['high', 'medium']:
-                    if impact['fouls'] == 'increase':
-                        opportunity['betting_recommendations'].append(
-                            f"✅ BACK: Player to commit 2+ fouls (avg: {player_stats.fouls_per_90}/90)"
-                        )
-                    if impact['cards'] == 'increase' and player_stats.cards_per_90 > 0.3:
-                        opportunity['betting_recommendations'].append(
-                            f"✅ BACK: Player to be booked (avg: {player_stats.cards_per_90} cards/90)"
-                        )
-                    if impact['shots'] == 'increase':
-                        opportunity['betting_recommendations'].append(
-                            f"✅ BACK: Player 1+ shot on target"
-                        )
-                    if impact['shots'] in ['decrease', 'significant_decrease']:
-                        opportunity['betting_recommendations'].append(
-                            f"❌ AVOID: Player shots/goals markets"
-                        )
-                    if impact['fouls'] == 'decrease':
-                        opportunity['betting_recommendations'].append(
-                            f"❌ AVOID: Player fouls markets"
-                        )
-                
-                if opportunity['betting_recommendations']:
-                    analysis['opportunities'].append(opportunity)
-    
-    return analysis if analysis['opportunities'] else None
+# ================= TODAY FIX =================
+
+async def get_today_matches(league_codes: List[str]):
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    matches = []
+
+    for code in league_codes:
+        params = {
+            'league': LEAGUES[code]['id'],
+            'date': today
+        }
+
+        data = await api_get('fixtures', params)
+        if data and data.get('response'):
+            for m in data['response']:
+                m['league_code'] = code
+                matches.append(m)
+
+    return matches
 
 
-def format_detailed_analysis(analysis: Dict) -> str:
-    msg = f"🚨 **BETTING OPPORTUNITY DETECTED** 🚨\n\n"
-    msg += f"🏆 **{analysis['league']}**\n"
-    msg += f"⚽ **{analysis['home_team']} vs {analysis['away_team']}**\n"
-    msg += f"🕐 {analysis['kickoff']}\n\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    for i, opp in enumerate(analysis['opportunities'], 1):
-        confidence_emoji = {'high': '🔥', 'medium': '⚡', 'low': '💡'}
-        confidence = opp['impact']['confidence']
-        
-        msg += f"{confidence_emoji.get(confidence, '💡')} **OPPORTUNITY #{i}** - {confidence.upper()} CONFIDENCE\n\n"
-        msg += f"👤 **Player:** {opp['player']} ({opp['team']})\n"
-        msg += f"📍 **Position Change:**\n"
-        msg += f"   • Usual: {opp['usual_position']}\n"
-        msg += f"   • Today: {opp['current_position']}\n\n"
-        msg += f"📊 **Season Stats (per 90min):**\n"
-        msg += f"   • Fouls: {opp['stats']['fouls_per_90']}\n"
-        msg += f"   • Cards: {opp['stats']['cards_per_90']}\n"
-        msg += f"   • Shots: {opp['stats']['shots_per_90']}\n\n"
-        msg += f"💰 **Betting Recommendations:**\n"
-        for rec in opp['betting_recommendations']:
-            msg += f"{rec}\n"
-        msg += "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    msg += "⚠️ *Always gamble responsibly. These are analytical insights, not guarantees.*"
-    return msg
-
+# ================= COMMANDS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = {'pl', 'ucl'}
-    
-    await update.message.reply_text(
-        "⚽ **Football Position Analyzer Bot**\n\n"
-        "🎯 Find betting opportunities from lineup changes!\n\n"
-        "**Quick Commands:**\n"
-        "/next - Upcoming matches (all leagues)\n"
-        "/pl - Premier League only\n"
-        "/ucl - Champions League only\n"
-        "/check [id] - Analyze match\n"
-        "/today - Today's matches\n"
-        "/leagues - Manage leagues\n"
-        "/help - Full help\n\n"
-        "💡 **Quick Start:**\n"
-        "1. Send /next or /pl or /ucl\n"
-        "2. Wait for lineups (60-90min before kickoff)\n"
-        "3. Send /check [ID] to analyze\n"
-        "4. Get betting insights!\n\n"
-        "⚠️ Default: Premier League + Champions League"
-    )
-
-
-async def leagues_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = {'pl', 'ucl'}
-    
-    active = user_preferences[user_id]
-    
-    msg = "🏆 **Available Leagues:**\n\n"
-    for code, info in LEAGUES.items():
-        status = "✅" if code in active else "⬜"
-        msg += f"{status} {info['emoji']} **{info['name']}** - `/add_{code}` or `/remove_{code}`\n"
-    
-    msg += f"\n**Your active leagues:** {', '.join([LEAGUES[c]['name'] for c in active])}\n\n"
-    msg += "💡 Use `/add_[league]` or `/remove_[league]` to customize"
-    
-    await update.message.reply_text(msg)
+    user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
+    await update.message.reply_text("⚽ Bot ready. Use /next or /today")
 
 
 async def next_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = {'pl', 'ucl'}
-    
-    if context.args:
-        league_code = context.args[0].lower()
-        if league_code in LEAGUES:
-            leagues_to_check = [league_code]
-        else:
-            await update.message.reply_text(f"❌ Unknown league: {league_code}\n\nUse /leagues to see available leagues")
-            return
-    else:
-        leagues_to_check = list(user_preferences[user_id])
-    
+    leagues = user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
     await update.message.reply_text("🔍 Fetching upcoming matches...")
-    
-    matches = await get_upcoming_matches(leagues_to_check)
-    
+
+    matches = await get_upcoming_matches(list(leagues))
     if not matches:
-        await update.message.reply_text("No upcoming matches found in selected leagues.")
+        await update.message.reply_text("No upcoming matches found.")
         return
-    
-    msg = "📅 **Upcoming Matches:**\n\n"
-    current_league = None
-    
-    for match in matches[:20]:
-        league_code = match.get('league_code', 'pl')
-        league_info = LEAGUES.get(league_code, LEAGUES['pl'])
-        
-        if current_league != league_info['name']:
-            current_league = league_info['name']
-            msg += f"\n{league_info['emoji']} **{league_info['name']}**\n"
-        
-        home = match['teams']['home']['name']
-        away = match['teams']['away']['name']
-        date_str = match['fixture']['date']
-        fixture_id = match['fixture']['id']
-        
-        kickoff = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        time_str = kickoff.strftime('%a %d %b, %H:%M')
-        
-        msg += f"⚽ {home} vs {away}\n"
-        msg += f"   🕐 {time_str} | 🆔 `{fixture_id}`\n"
-    
-    msg += "\n💡 Use `/check [ID]` to analyze a match"
-    await update.message.reply_text(msg)
 
-
-async def league_specific_matches(update: Update, context: ContextTypes.DEFAULT_TYPE, league_code: str):
-    if league_code not in LEAGUES:
-        await update.message.reply_text("❌ League not found")
-        return
-    
-    league_info = LEAGUES[league_code]
-    await update.message.reply_text(f"🔍 Fetching {league_info['name']} matches...")
-    
-    matches = await get_upcoming_matches([league_code])
-    
-    if not matches:
-        await update.message.reply_text(f"No upcoming {league_info['name']} matches.")
-        return
-    
-    msg = f"{league_info['emoji']} **{league_info['name']} - Upcoming Matches:**\n\n"
-    
-    for match in matches[:15]:
-        home = match['teams']['home']['name']
-        away = match['teams']['away']['name']
-        date_str = match['fixture']['date']
-        fixture_id = match['fixture']['id']
-        
-        kickoff = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        time_str = kickoff.strftime('%a %d %b, %H:%M')
-        
-        msg += f"⚽ **{home} vs {away}**\n"
-        msg += f"   🕐 {time_str}\n"
-        msg += f"   🆔 ID: `{fixture_id}`\n\n"
-    
-    msg += "💡 Use `/check [ID]` to analyze"
-    await update.message.reply_text(msg)
-
-
-async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = {'pl', 'ucl'}
-    
-    await update.message.reply_text("🔍 Checking today's matches...")
-    
-    today = datetime.now()
-    all_matches = []
-    
-    for league_code in user_preferences[user_id]:
-        league_id = LEAGUES[league_code]['id']
-        params = {
-            'league': league_id,
-            'season': CURRENT_SEASON,
-            'date': today.strftime('%Y-%m-%d')
-        }
-        
-        data = await get_api_football_data('fixtures', params)
-        if data and data.get('response'):
-            for match in data['response']:
-                match['league_code'] = league_code
-                all_matches.append(match)
-    
-    if not all_matches:
-        await update.message.reply_text("No matches today in your selected leagues.")
-        return
-    
-    msg = "📅 **Today's Matches:**\n\n"
-    current_league = None
-    
-    for match in all_matches:
-        league_code = match.get('league_code', 'pl')
-        league_info = LEAGUES.get(league_code, LEAGUES['pl'])
-        
-        if current_league != league_info['name']:
-            current_league = league_info['name']
-            msg += f"\n{league_info['emoji']} **{league_info['name']}**\n"
-        
-        home = match['teams']['home']['name']
-        away = match['teams']['away']['name']
-        fixture_id = match['fixture']['id']
-        kickoff = datetime.fromisoformat(match['fixture']['date'].replace('Z', '+00:00'))
-        
-        msg += f"⚽ {home} vs {away}\n"
-        msg += f"   🕐 {kickoff.strftime('%H:%M')} | 🆔 `{fixture_id}`\n"
-    
-    msg += "\n💡 Use `/check [ID]` when lineups drop!"
-    await update.message.reply_text(msg)
-
-
-async def check_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "⚠️ Please provide a match ID\n\n"
-            "Usage: `/check [match_id]`\n"
-            "Use /next or /pl or /ucl to see matches"
-        )
-        return
-    
-    try:
-        fixture_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Invalid match ID. Must be a number.")
-        return
-    
-    await update.message.reply_text(
-        f"🔍 Analyzing match {fixture_id}...\n"
-        "⏳ This takes 30-60 seconds...\n\n"
-        "Building player histories and fetching stats..."
-    )
-    
-    params = {'id': fixture_id}
-    match_data = await get_api_football_data('fixtures', params)
-    
-    if not match_data or not match_data.get('response'):
-        await update.message.reply_text("❌ Match not found.")
-        return
-    
-    match_info = match_data['response'][0]
-    analysis = await analyze_lineup_detailed(fixture_id, match_info)
-    
-    if analysis:
-        message = format_detailed_analysis(analysis)
-        await update.message.reply_text(message, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(
-            "ℹ️ No significant betting opportunities detected.\n\n"
-            "Possible reasons:\n"
-            "• All players in usual positions\n"
-            "• Lineups not yet released\n"
-            "• Insufficient historical data\n\n"
-            "💡 Lineups usually drop 60-90min before kickoff!"
+    msg = "📅 Upcoming Matches:\n\n"
+    for m in matches[:20]:
+        kickoff = datetime.fromisoformat(m['fixture']['date'].replace('Z', '+00:00'))
+        msg += (
+            f"{LEAGUES[m['league_code']]['emoji']} "
+            f"{m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
+            f"🕐 {kickoff:%a %d %b %H:%M} | 🆔 `{m['fixture']['id']}`\n\n"
         )
 
+    await update.message.reply_text(msg)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚽ **Football Position Analyzer Bot**\n\n"
-        "**Commands:**\n"
-        "/start - Welcome & setup\n"
-        "/next - Upcoming matches (all active leagues)\n"
-        "/pl - Premier League matches\n"
-        "/ucl - Champions League matches\n"
-        "/laliga - La Liga matches\n"
-        "/seriea - Serie A matches\n"
-        "/bundesliga - Bundesliga matches\n"
-        "/ligue1 - Ligue 1 matches\n"
-        "/today - Today's matches\n"
-        "/check [id] - Analyze match lineup\n"
-        "/leagues - Manage leagues\n"
-        "/help - Show this message\n\n"
-        "**How it works:**\n"
-        "1. Bot tracks player positions from recent matches\n"
-        "2. When you check a match, it compares positions\n"
-        "3. Detects out-of-position players\n"
-        "4. Provides betting insights\n\n"
-        "**Betting Markets:**\n"
-        "🟡 Player bookings\n"
-        "⚽ Shots on target\n"
-        "🚫 Fouls committed\n\n"
-        "⚠️ Gamble responsibly!"
-    )
 
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    leagues = user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
+    matches = await get_today_matches(list(leagues))
+
+    if not matches:
+        await update.message.reply_text("No matches today.")
+        return
+
+    msg = "📅 Today's Matches:\n\n"
+    for m in matches:
+        kickoff = datetime.fromisoformat(m['fixture']['date'].replace('Z', '+00:00'))
+        msg += (
+            f"{LEAGUES[m['league_code']]['emoji']} "
+            f"{m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
+            f"🕐 {kickoff:%H:%M} | 🆔 `{m['fixture']['id']}`\n\n"
+        )
+
+    await update.message.reply_text(msg)
+
+
+# ================= MAIN =================
 
 def main():
-    logger.info("Starting Football Position Analyzer Bot...")
-    
-    health_thread = Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-    logger.info("✅ Health check server started")
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("leagues", leagues_command))
-    
-    application.add_handler(CommandHandler("next", next_matches))
-    application.add_handler(CommandHandler("today", today_matches))
-    application.add_handler(CommandHandler("check", check_match))
-    
-    application.add_handler(CommandHandler("pl", lambda u, c: league_specific_matches(u, c, 'pl')))
-    application.add_handler(CommandHandler("ucl", lambda u, c: league_specific_matches(u, c, 'ucl')))
-    application.add_handler(CommandHandler("laliga", lambda u, c: league_specific_matches(u, c, 'laliga')))
-    application.add_handler(CommandHandler("seriea", lambda u, c: league_specific_matches(u, c, 'seriea')))
-    application.add_handler(CommandHandler("bundesliga", lambda u, c: league_specific_matches(u, c, 'bundesliga')))
-    application.add_handler(CommandHandler("ligue1", lambda u, c: league_specific_matches(u, c, 'ligue1')))
-    
-    logger.info("✅ Telegram bot started! Waiting for commands...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    Thread(target=run_health_server, daemon=True).start()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("next", next_matches))
+    app.add_handler(CommandHandler("today", today))
+
+    logger.info("Bot started")
+    app.run_polling()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
