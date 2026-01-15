@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -18,9 +18,7 @@ API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "YOUR_API_FOOTBALL_KEY")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 HEALTH_CHECK_PORT = int(os.getenv("PORT", "8000"))
 
-# IMPORTANT:
-# API-Football uses the *start year* of the season
-# 2025 = 2025/26 season (still valid in Jan–May 2026)
+# API-Football season = start year
 CURRENT_SEASON = 2025
 
 
@@ -33,21 +31,18 @@ LEAGUES = {
     'ligue1': {'id': 61, 'name': 'Ligue 1', 'emoji': '🇫🇷'}
 }
 
-POSITION_MAP = {'G': 'Goalkeeper', 'D': 'Defender', 'M': 'Midfielder', 'F': 'Forward'}
-
 
 # ================= LOGGING =================
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 
 # ================= STORAGE =================
 
-player_history: Dict[int, "PlayerStats"] = {}
 user_preferences: Dict[int, Set[str]] = {}
 
 
@@ -57,43 +52,20 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Bot is running')
+        self.wfile.write(b"OK")
 
     def log_message(self, *_):
         pass
 
 
 def run_health_server():
-    HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthCheckHandler).serve_forever()
-
-
-# ================= PLAYER MODEL =================
-
-class PlayerStats:
-    def __init__(self, pid: int, name: str):
-        self.id = pid
-        self.name = name
-        self.positions: List[str] = []
-        self.fouls_per_90 = 0.0
-        self.cards_per_90 = 0.0
-        self.shots_per_90 = 0.0
-
-    def add_position(self, pos: str):
-        self.positions.append(pos)
-        if len(self.positions) > 10:
-            self.positions.pop(0)
-
-    def usual_position(self) -> str:
-        return max(set(self.positions), key=self.positions.count) if self.positions else "Unknown"
-
-    def is_out_of_position(self, current: str) -> bool:
-        return len(self.positions) >= 3 and current != self.usual_position()
+    HTTPServer(("0.0.0.0", HEALTH_CHECK_PORT), HealthCheckHandler).serve_forever()
 
 
 # ================= API =================
 
-async def api_get(endpoint: str, params: Dict = None):
-    headers = {'x-apisports-key': API_FOOTBALL_KEY}
+async def api_get(endpoint: str, params: Dict):
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
     async with aiohttp.ClientSession() as session:
         async with session.get(
             f"{API_FOOTBALL_BASE}/{endpoint}",
@@ -107,51 +79,46 @@ async def api_get(endpoint: str, params: Dict = None):
             return None
 
 
-# ================= FIXED FIXTURE FETCH =================
+# ================= FIXTURE FETCH =================
 
 async def get_upcoming_matches(league_codes: List[str], hours_ahead: int = 168):
-    today = datetime.utcnow()
-    future = today + timedelta(hours=hours_ahead)
+    now = datetime.utcnow() - timedelta(hours=6)
+    future = now + timedelta(hours=hours_ahead + 6)
     matches = []
 
     for code in league_codes:
         league = LEAGUES[code]
-
-        # CRITICAL FIX:
-        # Do NOT combine season + date range
         params = {
-            'league': league['id'],
-            'from': today.strftime('%Y-%m-%d'),
-            'to': future.strftime('%Y-%m-%d')
+            "league": league["id"],
+            "from": now.strftime("%Y-%m-%d"),
+            "to": future.strftime("%Y-%m-%d")
         }
 
-        data = await api_get('fixtures', params)
-        if data and data.get('response'):
-            for m in data['response']:
-                m['league_code'] = code
+        data = await api_get("fixtures", params)
+        if data and data.get("response"):
+            for m in data["response"]:
+                m["league_code"] = code
                 matches.append(m)
 
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.3)
 
-    return sorted(matches, key=lambda x: x['fixture']['date'])
+    return sorted(matches, key=lambda x: x["fixture"]["date"])
 
-
-# ================= TODAY FIX =================
 
 async def get_today_matches(league_codes: List[str]):
-    today = datetime.utcnow().strftime('%Y-%m-%d')
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     matches = []
 
     for code in league_codes:
         params = {
-            'league': LEAGUES[code]['id'],
-            'date': today
+            "league": LEAGUES[code]["id"],
+            "date": today
         }
 
-        data = await api_get('fixtures', params)
-        if data and data.get('response'):
-            for m in data['response']:
-                m['league_code'] = code
+        data = await api_get("fixtures", params)
+        if data and data.get("response"):
+            for m in data["response"]:
+                m["league_code"] = code
                 matches.append(m)
 
     return matches
@@ -160,62 +127,98 @@ async def get_today_matches(league_codes: List[str]):
 # ================= COMMANDS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
-    await update.message.reply_text("⚽ Bot ready. Use /next or /today")
+    user_preferences.setdefault(update.effective_user.id, {"pl", "ucl"})
+    await update.message.reply_text(
+        "⚽ Lineup Checker Bot\n\n"
+        "Commands:\n"
+        "/next – upcoming matches\n"
+        "/today – today’s matches\n"
+        "/pl /ucl /laliga /seriea /bundesliga /ligue1\n"
+    )
+
+
+async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    active = user_preferences.setdefault(update.effective_user.id, {"pl", "ucl"})
+
+    msg = "🏆 Available leagues\n\n"
+    for code, info in LEAGUES.items():
+        status = "✅" if code in active else "⬜"
+        msg += f"{status} {info['emoji']} {info['name']}  →  /{code}\n"
+
+    msg += "\nActive:\n• " + "\n• ".join(LEAGUES[c]["name"] for c in active)
+    await update.message.reply_text(msg)
 
 
 async def next_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    leagues = user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
-    await update.message.reply_text("🔍 Fetching upcoming matches...")
+    leagues = user_preferences.setdefault(update.effective_user.id, {"pl", "ucl"})
+    await update.message.reply_text("🔍 Fetching upcoming matches…")
 
     matches = await get_upcoming_matches(list(leagues))
     if not matches:
-        await update.message.reply_text("No upcoming matches found.")
+        await update.message.reply_text(
+            "No upcoming matches found.\n\n"
+            "This can happen if:\n"
+            "• No fixtures this week\n"
+            "• Competition between rounds\n"
+            "• API temporarily unavailable"
+        )
         return
 
-    msg = "📅 Upcoming Matches:\n\n"
+    msg = "📅 Upcoming matches\n\n"
     for m in matches[:20]:
-        kickoff = datetime.fromisoformat(m['fixture']['date'].replace('Z', '+00:00'))
+        kickoff = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
         msg += (
             f"{LEAGUES[m['league_code']]['emoji']} "
             f"{m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
-            f"🕐 {kickoff:%a %d %b %H:%M} | 🆔 `{m['fixture']['id']}`\n\n"
+            f"🕐 {kickoff:%a %d %b %H:%M}\n"
+            f"🆔 {m['fixture']['id']}\n\n"
         )
 
     await update.message.reply_text(msg)
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    leagues = user_preferences.setdefault(update.effective_user.id, {'pl', 'ucl'})
+    leagues = user_preferences.setdefault(update.effective_user.id, {"pl", "ucl"})
     matches = await get_today_matches(list(leagues))
 
     if not matches:
         await update.message.reply_text("No matches today.")
         return
 
-    msg = "📅 Today's Matches:\n\n"
+    msg = "📅 Today’s matches\n\n"
     for m in matches:
-        kickoff = datetime.fromisoformat(m['fixture']['date'].replace('Z', '+00:00'))
+        kickoff = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
         msg += (
             f"{LEAGUES[m['league_code']]['emoji']} "
             f"{m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
-            f"🕐 {kickoff:%H:%M} | 🆔 `{m['fixture']['id']}`\n\n"
+            f"🕐 {kickoff:%H:%M}\n"
+            f"🆔 {m['fixture']['id']}\n\n"
         )
 
     await update.message.reply_text(msg)
+
+
+async def league_only(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    user_preferences[update.effective_user.id] = {code}
+    await next_matches(update, context)
 
 
 # ================= MAIN =================
 
 def main():
     Thread(target=run_health_server, daemon=True).start()
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("leagues", leagues))
     app.add_handler(CommandHandler("next", next_matches))
     app.add_handler(CommandHandler("today", today))
 
-    logger.info("Bot started")
+    for code in LEAGUES:
+        app.add_handler(CommandHandler(code, lambda u, c, x=code: league_only(u, c, x)))
+
+    logger.info("Bot running")
     app.run_polling()
 
 
