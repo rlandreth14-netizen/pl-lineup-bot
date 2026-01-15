@@ -642,6 +642,7 @@ def main():
     application.add_handler(CommandHandler("live", live_matches))
     application.add_handler(CommandHandler("next", next_matches))
     application.add_handler(CommandHandler("check", check_match))
+    application.add_handler(CommandHandler("debug", debug_command))
     
     application.add_handler(CommandHandler("pl", lambda u, c: league_specific(u, c, 'pl')))
     application.add_handler(CommandHandler("ucl", lambda u, c: league_specific(u, c, 'ucl')))
@@ -649,6 +650,53 @@ def main():
     application.add_handler(CommandHandler("seriea", lambda u, c: league_specific(u, c, 'seriea')))
     application.add_handler(CommandHandler("bundesliga", lambda u, c: league_specific(u, c, 'bundesliga')))
     application.add_handler(CommandHandler("ligue1", lambda u, c: league_specific(u, c, 'ligue1')))
+
+    async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Running API debug test...")
+    
+    # Test Premier League
+    today = datetime.now()
+    future = today + timedelta(days=7)
+    
+    params = {
+        'league': 39,
+        'season': 2025,
+        'from': today.strftime('%Y-%m-%d'),
+        'to': future.strftime('%Y-%m-%d')
+    }
+    
+    data = await get_api_football_data('fixtures', params)
+    
+    msg = "**Debug Info:**\n\n"
+    msg += f"Today: {today.strftime('%Y-%m-%d')}\n"
+    msg += f"Search until: {future.strftime('%Y-%m-%d')}\n"
+    msg += f"League: 39 (Premier League)\n"
+    msg += f"Season: 2025\n\n"
+    
+    if data:
+        results = data.get('response', [])
+        msg += f"✅ API responded\n"
+        msg += f"Matches found: {len(results)}\n\n"
+        
+        if results:
+            msg += "**First 3 matches:**\n"
+            for match in results[:3]:
+                home = match['teams']['home']['name']
+                away = match['teams']['away']['name']
+                date = match['fixture']['date']
+                msg += f"• {home} vs {away}\n  {date}\n"
+        else:
+            msg += "❌ No fixtures returned by API\n"
+            msg += "This means no PL matches scheduled in next 7 days"
+    else:
+        msg += "❌ API call failed completely"
+    
+    await update.message.reply_text(msg)
+```
+
+Commit, wait for redeploy, then send:
+```
+/debug
     
     logger.info("✅ Bot ready - Season 2025")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
