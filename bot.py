@@ -9,8 +9,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_KEY = os.getenv("api_key") # Corrected lowercase key
-SEASON = "2025"
+API_KEY = os.getenv("api_key") 
+# CHANGED: Reverted to 2024 as requested by your API error log
+SEASON = "2024" 
 
 # --- KOYEB HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -18,8 +19,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is Healthy")
-    def log_message(self, format, *args):
-        pass
+    def log_message(self, format, *args): pass
 
 def run_health_server():
     port = int(os.getenv("PORT", 8000))
@@ -43,6 +43,7 @@ def get_api_data(endpoint):
         if response.status_code == 200:
             data = response.json()
             if data.get('errors'):
+                # We log this but keep going
                 logging.error(f"API Provider Error: {data['errors']}")
             return data.get('response', [])
         return []
@@ -82,7 +83,8 @@ async def handle_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await list_fixtures_func(update, LEAGUE_MAP[cmd], cmd.upper(), from_message=True)
 
 async def list_fixtures_func(update, league_id, name, from_message=False):
-    """Checks Today, Tomorrow, and Day After to stay in Free Plan limits"""
+    """Bypasses 'Next' error by checking specific dates only"""
+    # Check Today, Tomorrow, Day After
     dates_to_check = [
         datetime.now().strftime('%Y-%m-%d'),
         (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d'),
@@ -93,13 +95,14 @@ async def list_fixtures_func(update, league_id, name, from_message=False):
     found_date = ""
 
     for d in dates_to_check:
+        # We use the SEASON variable which is now set to 2024 to appease the Free Plan
         results = get_api_data(f"fixtures?league={league_id}&season={SEASON}&date={d}")
         if results:
             fixtures, found_date = results, d
             break
 
     if not fixtures:
-        msg = f"ℹ️ No {name} matches found in the next 48 hours."
+        msg = f"ℹ️ No {name} matches found (Season {SEASON}) for the next 48 hours."
         if from_message: await update.message.reply_text(msg)
         else: await update.callback_query.edit_message_text(msg)
         return
