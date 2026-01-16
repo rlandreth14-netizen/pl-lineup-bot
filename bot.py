@@ -9,8 +9,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-SEASON = "2025"  # Covers the 2025/2026 season cycle
+# FIX: Changed to lowercase 'api_key' to match your Koyeb settings exactly
+API_KEY = os.getenv("api_key") 
+SEASON = "2025"
 
 # --- KOYEB HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -37,7 +38,6 @@ LEAGUE_MAP = {
     "ucl": 2
 }
 
-# Player position history (simple in-memory cache)
 player_positions = {}
 
 def get_api_data(endpoint):
@@ -51,17 +51,18 @@ def get_api_data(endpoint):
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            results = data.get('response', [])
-            return results
+            # Log any errors returned inside the JSON from the provider
+            if data.get('errors'):
+                logging.error(f"API Provider Error: {data['errors']}")
+            return data.get('response', [])
         else:
-            logging.error(f"API Error: {response.status_code}")
+            logging.error(f"HTTP Error: {response.status_code}")
             return []
     except Exception as e:
         logging.error(f"API Exception: {e}")
         return []
 
 def analyze_position_change(player_id, current_pos, player_name):
-    """Check if player is out of position and generate betting insights"""
     if player_id not in player_positions:
         player_positions[player_id] = {'name': player_name, 'positions': []}
     
@@ -70,8 +71,7 @@ def analyze_position_change(player_id, current_pos, player_name):
         player_positions[player_id]['positions'].pop(0)
     
     positions = player_positions[player_id]['positions']
-    if len(positions) < 2:
-        return None
+    if len(positions) < 2: return None
     
     usual_pos = max(set(positions[:-1]), key=positions[:-1].count)
     
@@ -102,7 +102,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(
         "⚽ **Football Position Analyzer**\nFind betting edges via lineup changes.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
 async def handle_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,33 +112,45 @@ async def handle_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await list_fixtures_func(update, LEAGUE_MAP[cmd], cmd.upper(), from_message=True)
 
 async def list_fixtures_func(update, league_id, name, from_message=False):
-    """List today's fixtures and show the 'View Lineups' button for each"""
+    """List fixtures: Try today first, then fall back to next 10 if empty"""
     today = datetime.now().strftime('%Y-%m-%d')
-    fixtures = get_api_data(f"fixtures?league={league_id}&season={SEASON}&date={today}")
     
+    # 1. Try today's date
+    fixtures = get_api_data(f"fixtures?league={league_id}&season={SEASON}&date={today}")
+    msg_header = f"📅 **{name} Matches Today:**\n\n"
+    
+    # 2. If no games today, get the next 10 games
     if not fixtures:
-        msg = f"ℹ️ No matches found for {name} today ({today})."
+        logging.info(f"No games today for {name}, fetching upcoming...")
+        fixtures = get_api_data(f"fixtures?league={league_id}&next=10")
+        msg_header = f"📅 **Upcoming {name} Matches:**\n\n"
+
+    if not fixtures:
+        msg = f"ℹ️ No matches found for {name}."
         if from_message: await update.message.reply_text(msg)
         else: await update.callback_query.edit_message_text(msg)
         return
 
-    msg_header = f"📅 **{name} Matches Today:**\n\n"
     if not from_message:
         await update.callback_query.message.reply_text(msg_header, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(msg_header, parse_mode='Markdown')
 
     for f in fixtures:
         f_id = f['fixture']['id']
         home = f['teams']['home']['name']
         away = f['teams']['away']['name']
-        time = f['fixture']['date'][11:16]
+        # Format date for upcoming games
+        f_date = f['fixture']['date'][5:10] # MM-DD
+        f_time = f['fixture']['date'][11:16] # HH:MM
         
-        text = f"⚽ **{home} vs {away}**\n⏰ Time: {time} GMT"
+        text = f"⚽ **{home} vs {away}**\n🗓 Date: {f_date} | ⏰ Time: {f_time} UTC"
         btns = [[InlineKeyboardButton("📋 View Lineups & Positions", callback_data=f"lineup_{f_id}")]]
         
         if from_message:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode='HTML')
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown')
         else:
-            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode='HTML')
+            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown')
 
 async def show_lineups(update: Update, fixture_id: str):
     query = update.callback_query
