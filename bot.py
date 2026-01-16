@@ -10,8 +10,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_KEY = os.getenv("api_key") 
-# CHANGED: Reverted to 2024 as requested by your API error log
-SEASON = "2024" 
+
+# SAVED PREVIOUS CONFIG: 
+# SEASON = "2024" (If no-season trick fails, we will put this back in the URL)
 
 # --- KOYEB HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -43,7 +44,6 @@ def get_api_data(endpoint):
         if response.status_code == 200:
             data = response.json()
             if data.get('errors'):
-                # We log this but keep going
                 logging.error(f"API Provider Error: {data['errors']}")
             return data.get('response', [])
         return []
@@ -63,11 +63,9 @@ def analyze_position_change(player_id, current_pos, player_name):
     if usual_pos != current_pos:
         insights = []
         if usual_pos == 'D' and current_pos in ['M', 'F']:
-            insights.append("✅ BACK: Shots on target (Attacking role)")
+            insights.append("✅ BACK: Player shots on target")
         elif usual_pos == 'M' and current_pos == 'D':
-            insights.append("✅ BACK: 2+ fouls (Defensive role)")
-        elif usual_pos == 'M' and current_pos == 'F':
-            insights.append("✅ BACK: Anytime Goalscorer")
+            insights.append("✅ BACK: Player to commit 2+ fouls")
         if insights:
             return {'player': player_name, 'usual': usual_pos, 'current': current_pos, 'insights': insights}
     return None
@@ -75,7 +73,7 @@ def analyze_position_change(player_id, current_pos, player_name):
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await update.message.reply_text("⚽ **Football Position Analyzer**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text("⚽ **Position Analyzer**\nReady to find betting edges.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def handle_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = update.message.text.lower().replace("/", "")
@@ -83,26 +81,24 @@ async def handle_text_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await list_fixtures_func(update, LEAGUE_MAP[cmd], cmd.upper(), from_message=True)
 
 async def list_fixtures_func(update, league_id, name, from_message=False):
-    """Bypasses 'Next' error by checking specific dates only"""
-    # Check Today, Tomorrow, Day After
+    # TRICK: We are removing '&season=' to see if the API defaults to the active season
     dates_to_check = [
         datetime.now().strftime('%Y-%m-%d'),
-        (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d'),
-        (datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d')
+        (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
     ]
     
     fixtures = []
     found_date = ""
 
     for d in dates_to_check:
-        # We use the SEASON variable which is now set to 2024 to appease the Free Plan
-        results = get_api_data(f"fixtures?league={league_id}&season={SEASON}&date={d}")
+        # THE TRICK LINE: No season parameter used here
+        results = get_api_data(f"fixtures?league={league_id}&date={d}")
         if results:
             fixtures, found_date = results, d
             break
 
     if not fixtures:
-        msg = f"ℹ️ No {name} matches found (Season {SEASON}) for the next 48 hours."
+        msg = f"ℹ️ No {name} matches found for Today or Tomorrow. The Free Plan may be restricting this league's live data."
         if from_message: await update.message.reply_text(msg)
         else: await update.callback_query.edit_message_text(msg)
         return
@@ -125,7 +121,7 @@ async def show_lineups(update: Update, fixture_id: str):
     if not lineups:
         await query.message.reply_text("⚠️ Lineups usually appear 60m before KO.")
         return
-    res = "📊 **LINEUPS & ANALYSIS**\n\n"
+    res = "📊 **ANALYSIS**\n\n"
     opps = []
     for team in lineups:
         res += f"**{team['team']['name']}**\n"
