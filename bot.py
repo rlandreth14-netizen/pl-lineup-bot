@@ -1,81 +1,91 @@
 import os
+import requests
 import asyncio
 import logging
-import threading
-import requests
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQuery_Handler, ContextTypes
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_KEY = os.getenv("API_FOOTBALL_KEY")
-PORT = int(os.getenv("PORT", 8000))
+# Today is Jan 16, 2026. Season index for these games is 2025.
+SEASON = "2025" 
 
+# --- KOYEB HEALTH CHECK SERVER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Healthy")
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# --- BOT LOGIC ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# --- LEAGUES ---
 LEAGUES = {
     "Premier League": 39,
+    "Championship": 40,
     "La Liga": 140,
-    "Bundesliga": 78,
+    "Serie A": 135,
     "Ligue 1": 61,
-    "Serie A": 135
+    "Bundesliga": 78
 }
 
-# --- API LOGIC ---
-def get_league_fixtures(league_id):
+def get_fixtures(league_id):
     headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     today = datetime.now().strftime('%Y-%m-%d')
-    # Season 2025 is the correct start year for Jan 2026 games
-    url = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season=2025&date={today}"
+    url = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={SEASON}&date={today}"
     
     try:
-        response = requests.get(url, headers=headers, timeout=10).json()
-        fixtures = response.get("response", [])
-        if not fixtures:
-            return "No games found for today."
-        
-        lines = []
-        for f in fixtures:
-            home = f['teams']['home']['name']
-            away = f['teams']['away']['name']
-            time = f['fixture']['date'][11:16]
-            status = f['fixture']['status']['short']
-            lines.append(f"⏰ {time} | {home} vs {away} ({status})")
-        return "\n".join(lines)
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        return data.get('response', [])
     except Exception as e:
-        return f"Error: {str(e)}"
+        logging.error(f"API Error: {e}")
+        return []
 
-# --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(name, callback_data=str(lid))] for name, lid in LEAGUES.items()]
+    keyboard = [[InlineKeyboardButton(name, callback_data=str(id))] for name, id in LEAGUES.items()]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Select a league to check today's lineups:", reply_markup=reply_markup)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     league_id = query.data
+    fixtures = get_fixtures(league_id)
+
+    if not fixtures:
+        await query.edit_message_text(f"No matches found for today (Season {SEASON}).")
+        return
+
+    message = "<b>Today's Matches:</b>\n\n"
+    for f in fixtures:
+        home = f['teams']['home']['name']
+        away = f['teams']['away']['name']
+        status = f['fixture']['status']['long']
+        message += f"⚽ {home} vs {away}\nStatus: {status}\n\n"
     
-    await query.edit_message_text(text="Searching API... please wait.")
-    results = await asyncio.to_thread(get_league_fixtures, league_id)
-    await query.edit_message_text(text=results)
+    await query.edit_message_text(message, parse_mode='HTML')
 
-# --- KOYEB HEALTH CHECK ---
-class Health(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+def main():
+    # Start Health Check in background
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # Start Bot
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQuery_Handler(button_handler))
+    
+    print("Bot is starting...")
+    application.run_polling()
 
-def run_health():
-    HTTPServer(('0.0.0.0', PORT), Health).serve_forever()
-
-# --- MAIN ---
 if __name__ == '__main__':
-    threading.Thread(target=run_health, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    logger.info("Bot is alive...")
-    app.run_polling(drop_pending_updates=True)
+    main()
