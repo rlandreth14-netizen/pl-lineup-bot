@@ -3,12 +3,12 @@ import asyncio
 import logging
 import threading
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FOOTBALL_API_KEY = os.getenv("API_FOOTBALL_KEY")
 PORT = int(os.getenv("PORT", 8000))
@@ -16,86 +16,79 @@ PORT = int(os.getenv("PORT", 8000))
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- KOYEB HEALTH CHECK WORKAROUND ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Healthy")
-    def log_message(self, format, *args): return
-
-def run_health_server():
-    httpd = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-    httpd.serve_forever()
-
-# --- FOOTBALL LOGIC ---
-LEAGUES = {
-    "Premier League": 39,
-    "Championship": 40,
-    "Ligue 1": 61,
-    "Bundesliga": 78,
-    "Serie A": 135,
-    "La Liga": 140
+# --- LEAGUES TO WATCH ---
+# Season 2025 is correct for games happening in Jan 2026
+WATCHED_LEAGUES = {
+    39: "Premier League",
+    40: "Championship",
+    61: "Ligue 1",
+    78: "Bundesliga",
+    135: "Serie A",
+    140: "La Liga"
 }
 
-def fetch_fixtures():
-    """Fetches games for today across top leagues."""
-    today = datetime.now().strftime('%Y-%m-%d')
-    all_fixtures = []
+def fetch_data():
+    headers = {'x-rapidapi-key': FOOTBALL_API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
+    results = []
     
-    headers = {
-        'x-rapidapi-key': FOOTBALL_API_KEY,
-        'x-rapidapi-host': 'v3.football.api-sports.io'
-    }
-
-    for name, league_id in LEAGUES.items():
-        # NOTE: Season 2025 covers the 2025/2026 period
-        url = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season=2025&date={today}"
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            data = response.json()
-            if data.get("response"):
-                for item in data["response"]:
+    # 1. Try Live Games first (Global check)
+    try:
+        live_url = "https://v3.football.api-sports.io/fixtures?live=all"
+        res = requests.get(live_url, headers=headers, timeout=10).json()
+        if res.get("response"):
+            for item in res["response"]:
+                l_id = item['league']['id']
+                if l_id in WATCHED_LEAGUES:
                     home = item['teams']['home']['name']
                     away = item['teams']['away']['name']
-                    time = item['fixture']['date'][11:16]
-                    all_fixtures.append(f"⚽ {name}: {home} vs {away} ({time} UTC)")
+                    score = f"{item['goals']['home']}-{item['goals']['away']}"
+                    results.append(f"🔴 LIVE: {home} {score} {away} ({WATCHED_LEAGUES[l_id]})")
+    except Exception as e:
+        logger.error(f"Live check failed: {e}")
+
+    # 2. Check Today's Schedule (If no live games or just to be thorough)
+    today = datetime.now().strftime('%Y-%m-%d')
+    for l_id, l_name in WATCHED_LEAGUES.items():
+        try:
+            # We use season 2025 for the 25/26 campaign
+            url = f"https://v3.football.api-sports.io/fixtures?league={l_id}&season=2025&date={today}"
+            res = requests.get(url, headers=headers, timeout=10).json()
+            if res.get("response"):
+                for item in res["response"]:
+                    status = item['fixture']['status']['short']
+                    if status == "NS": # Not Started
+                        home = item['teams']['home']['name']
+                        away = item['teams']['away']['name']
+                        time = item['fixture']['date'][11:16]
+                        results.append(f"📅 {time} UTC: {home} vs {away} ({l_name})")
         except Exception as e:
-            logger.error(f"Error fetching {name}: {e}")
-            
-    return all_fixtures
+            logger.error(f"Schedule check failed for {l_name}: {e}")
+
+    return list(set(results)) # Remove duplicates
 
 # --- BOT COMMANDS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Lineup Checker is active!\nUse /next to see today's fixtures.")
-
 async def next_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Checking today's top fixtures...")
-    
-    # Run API call in a thread to avoid blocking the bot
-    fixtures = await asyncio.to_thread(fetch_fixtures)
+    await update.message.reply_text("🛰️ Scanning for live games and today's fixtures...")
+    fixtures = await asyncio.to_thread(fetch_data)
     
     if not fixtures:
-        await update.message.reply_text("📅 No top-tier fixtures found for today (Jan 16).")
+        await update.message.reply_text("Empty pitch! No games found in your tracked leagues for today.")
     else:
-        message = "<b>Today's Fixtures:</b>\n\n" + "\n".join(fixtures)
-        await update.message.reply_text(message, parse_mode='HTML')
+        # Sort and send
+        msg = "<b>Match Day Report:</b>\n\n" + "\n".join(sorted(fixtures))
+        await update.message.reply_text(msg, parse_mode='HTML')
 
-# --- MAIN RUNNER ---
+# --- HEALTH CHECK & MAIN ---
+class HealthCheck(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+
 def main():
-    # Start Koyeb heart-beat
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    # Build Bot
+    threading.Thread(target=lambda: HTTPServer(('0.0.0.0', PORT), HealthCheck).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("next", next_games))
-    app.add_handler(CommandHandler("leagues", next_games)) # Alias for convenience
-
-    logger.info("Bot is running...")
-    app.run_polling(drop_pending_updates=True) # Clears the 'Conflict' error on start
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Ready! Use /next")))
+    logger.info("Bot started...")
+    app.run_polling(drop_pending_updates=True) # Clears the conflict error
 
 if __name__ == '__main__':
     main()
