@@ -6,15 +6,17 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQuery_Handler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- CONFIGURATION ---
+# These must be set as Environment Variables in Koyeb
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_KEY = os.getenv("API_FOOTBALL_KEY")
 # Today is Jan 16, 2026. Season index for these games is 2025.
 SEASON = "2025" 
 
 # --- KOYEB HEALTH CHECK SERVER ---
+# This prevents Koyeb from thinking the bot has failed
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -27,7 +29,10 @@ def run_health_server():
     server.serve_forever()
 
 # --- BOT LOGIC ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
 
 LEAGUES = {
     "Premier League": 39,
@@ -39,7 +44,10 @@ LEAGUES = {
 }
 
 def get_fixtures(league_id):
-    headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
+    headers = {
+        'x-rapidapi-key': API_KEY, 
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
     today = datetime.now().strftime('%Y-%m-%d')
     url = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={SEASON}&date={today}"
     
@@ -59,6 +67,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     league_id = query.data
     fixtures = get_fixtures(league_id)
 
@@ -76,13 +85,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(message, parse_mode='HTML')
 
 def main():
-    # Start Health Check in background
+    # 1. Start Health Check server in a background thread
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    # Start Bot
+    # 2. Start the Telegram Bot
     application = Application.builder().token(TOKEN).build()
+    
+    # Handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQuery_Handler(button_handler))
+    application.add_handler(CallbackQueryHandler(button_handler))
     
     print("Bot is starting...")
     application.run_polling()
