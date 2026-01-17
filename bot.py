@@ -4,6 +4,7 @@ import logging
 import json
 from bs4 import BeautifulSoup
 from datetime import datetime
+from pymongo import MongoClient
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,68 +12,75 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI") # Use the string you got from Mongo
+
+# Connect to MongoDB
+client = MongoClient(MONGO_URI)
+db = client['football_bot']
+player_collection = db['player_history']
+
 LEAGUE_MAP = {
     "pl": 47, "championship": 48, "laliga": 87, 
     "seriea": 55, "bundesliga": 54, "ligue1": 53
 }
 
+# Zone Mapping for Strategy
+POSITION_GROUPS = {
+    'GK': 'G',
+    'CB': 'D', 'LCB': 'D', 'RCB': 'D', 'LB': 'D', 'RB': 'D',
+    'LWB': 'W', 'RWB': 'W', 'LM': 'W', 'RM': 'W', 'LW': 'W', 'RW': 'W',
+    'CDM': 'M', 'LDM': 'M', 'RDM': 'M', 'CM': 'M', 'LCM': 'M', 'RCM': 'M',
+    'CAM': 'M', 'AM': 'M', 'ST': 'A', 'CF': 'A'
+}
+
+# --- DATABASE LOGIC ---
+def update_player_knowledge(lineup_data):
+    for p in lineup_data:
+        player_collection.update_one(
+            {"name": p['name']},
+            {"$inc": {f"positions.{p['pos']}": 1}},
+            upsert=True
+        )
+
+def get_usual_position(player_name):
+    player = player_collection.find_one({"name": player_name})
+    if player and 'positions' in player:
+        return max(player['positions'], key=player['positions'].get)
+    return None
+
 # --- SCRAPER LOGIC ---
 def get_league_matches(league_id):
-    """Automatically finds today's match links for a specific league on FotMob."""
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
         matches = data.get('matches', {}).get('allMatches', [])
-        
         today = datetime.now().strftime('%Y-%m-%d')
-        today_matches = []
-        
-        for m in matches:
-            # FotMob date format is usually 'Sun, Aug 11' or ISO strings
-            # We filter for 'today' or 'tomorrow' matches
-            if today in m.get('status', {}).get('utcTime', ''):
-                today_matches.append({
-                    'home': m['home']['name'],
-                    'away': m['away']['name'],
-                    'id': m['id'],
-                    'time': m['status']['utcTime'][11:16]
-                })
-        return today_matches
-    except Exception as e:
-        logging.error(f"League Fetch Error: {e}")
-        return []
+        return [m for m in matches if today in m.get('status', {}).get('utcTime', '')]
+    except: return []
 
 def scrape_lineup(match_id):
-    """Scrapes the actual lineup using the match ID found above."""
     url = f"https://www.fotmob.com/matches/{match_id}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        script = soup.find('script', id='__NEXT_DATA__')
-        data = json.loads(script.string)
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.content, 'html.parser')
+        data = json.loads(soup.find('script', id='__NEXT_DATA__').string)
         content = data['props']['pageProps']['content']
-        
         if 'lineup' not in content: return None
         
-        results = []
+        players = []
         for side in ['home', 'away']:
-            players = content['lineup'][side]['starting']
-            for p in players:
-                results.append({
-                    'name': p['name']['fullName'],
-                    'pos': p.get('positionStringShort', '??')
-                })
-        return results
-    except:
-        return None
+            for p in content['lineup'][side]['starting']:
+                players.append({'name': p['name']['fullName'], 'pos': p.get('positionStringShort', '??')})
+        return players
+    except: return None
 
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await update.message.reply_text("🔍 **Select a League to find today's edges:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text("🔍 **Select a League:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -82,22 +90,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         l_id = query.data.split("_")[1]
         matches = get_league_matches(l_id)
         if not matches:
-            await query.edit_message_text("📭 No matches found for today in this league.")
+            await query.edit_message_text("📭 No matches found for today.")
             return
-        
         for m in matches:
-            text = f"🏟 {m['home']} vs {m['away']}\n⏰ {m['time']} UTC"
-            btn = [[InlineKeyboardButton("📋 Analyze Lineup", callback_data=f"analyze_{m['id']}")]]
-            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btn))
+            btn = [[InlineKeyboardButton("📋 Analyze", callback_data=f"an_{m['id']}")]]
+            await query.message.reply_text(f"🏟 {m['home']} vs {m['away']}", reply_markup=InlineKeyboardMarkup(btn))
 
-    elif query.data.startswith("analyze_"):
+    elif query.data.startswith("an_"):
         m_id = query.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await query.message.reply_text("⏳ Lineups not out yet (Check 60m before KO).")
-        else:
-            # Insert your analysis logic here (usual vs current position)
-            res = "🚨 **Analysis Result:**\n" + "\n".join([f"• {p['name']} ({p['pos']})" for p in lineup[:5]]) # showing first 5 for brevity
-            await query.message.reply_text(res)
+            await query.message.reply_text("⏳ Lineups not out yet.")
+            return
+        
+        update_player_knowledge(lineup)
+        alerts = []
+        for p in lineup:
+            usual = get_usual_position(p['name'])
+            if usual and usual != p['pos']:
+                u_zone = POSITION_GROUPS.get(usual, 'M')
+                c_zone = POSITION_GROUPS.get(p['pos'], 'M')
+                
+                if u_zone == 'D' and c_zone in ['M', 'A']:
+                    alerts.append(f"🎯 **{p['name']}** ({usual}➔{p['pos']}): **SOT / Over 0.5 Shots**")
+                elif u_zone in ['A', 'M'] and c_zone == 'D':
+                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card Risk**")
+        
+        res = "🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ No changes found.")
+        await query.message.reply_text(res, parse_mode='Markdown')
 
-# (Add your HealthCheck and main() boilerplate here as before)
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.run_polling()
+
+if __name__ == '__main__': main()
