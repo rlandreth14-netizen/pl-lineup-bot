@@ -47,6 +47,26 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
+# --- UNIVERSAL PLAYER FINDER ---
+def extract_players_recursive(data):
+    found_players = []
+    if isinstance(data, dict):
+        # Check if this dict represents a player
+        name_obj = data.get('name')
+        name = name_obj.get('fullName') if isinstance(name_obj, dict) else name_obj
+        pos = data.get('positionShort') or data.get('position')
+        
+        # Only add if it's a starter (isFirstEleven is often a key in the API)
+        if name and pos and data.get('isFirstEleven', True):
+            found_players.append({'name': name, 'pos': pos})
+        
+        for v in data.values():
+            found_players.extend(extract_players_recursive(v))
+    elif isinstance(data, list):
+        for item in data:
+            found_players.extend(extract_players_recursive(item))
+    return found_players
+
 # --- SCRAPER (MATCHES) ---
 def get_league_matches(league_id):
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
@@ -62,8 +82,7 @@ def get_league_matches(league_id):
                 for i in obj: res.extend(find_m(i))
             return res
         today = datetime.now().strftime('%Y-%m-%d')
-        matches = []
-        seen = set()
+        matches, seen = [], set()
         for m in find_m(data):
             m_id = m.get('id')
             time_str = str(m.get('status', {}).get('utcTime', '')) or str(m.get('time', ''))
@@ -75,46 +94,27 @@ def get_league_matches(league_id):
         return matches
     except: return []
 
-# --- SCRAPER (LINEUPS - REWRITTEN) ---
+# --- SCRAPER (LINEUPS) ---
 def scrape_lineup(match_id):
     url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        logger.info(f"🔍 API Request for match {match_id}")
+        logger.info(f"🔍 Deep-scanning API for match {match_id}")
         data = requests.get(url, headers=headers, timeout=10).json()
         
-        # Dig into the 'lineup' section
-        content = data.get('content', {})
-        lineup_root = content.get('lineup', {})
+        # We only care about the lineup section to avoid bench players
+        lineup_root = data.get('content', {}).get('lineup', {})
+        all_players = extract_players_recursive(lineup_root)
         
-        # FotMob can use 'lineup' or 'starters' or a list
-        players = []
+        # Filter duplicates (sometimes API lists them twice in different formats)
+        unique_players = {p['name']: p for p in all_players}.values()
         
-        # Strategy: Check both home and away starters
-        for side in ['home', 'away']:
-            side_data = lineup_root.get(side, {})
-            # Look in 'starting' or 'starters' or 'players'
-            starters = side_data.get('starting') or side_data.get('starters')
-            
-            if starters:
-                # starters is often a list of rows/positions
-                for item in starters:
-                    if isinstance(item, list): # Multi-level list structure
-                        for p in item:
-                            name = p.get('name', {}).get('fullName')
-                            pos = p.get('positionShort', p.get('position'))
-                            if name and pos: players.append({'name': name, 'pos': pos})
-                    else: # Flat list structure
-                        name = item.get('name', {}).get('fullName')
-                        pos = item.get('positionShort', item.get('position'))
-                        if name and pos: players.append({'name': name, 'pos': pos})
-
-        if not players:
-            logger.warning(f"⚠️ No players found in API response for {match_id}")
+        if len(unique_players) < 11:
+            logger.warning(f"⚠️ Only {len(unique_players)} players found for {match_id}. Probably not out yet.")
             return None
             
-        logger.info(f"✅ Extracted {len(players)} players for {match_id}")
-        return players
+        logger.info(f"✅ Successfully found {len(unique_players)} players.")
+        return list(unique_players)
     except Exception as e:
         logger.error(f"❌ Scraper failure: {e}")
         return None
@@ -141,7 +141,7 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         m_id = q.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await q.message.reply_text("⏳ Lineups not confirmed (usually 60m before KO).")
+            await q.message.reply_text("⏳ Lineups not confirmed yet (Check ~60m before KO).")
             return
         update_player_knowledge(lineup)
         alerts = []
@@ -153,7 +153,7 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     alerts.append(f"🎯 **{p['name']}** ({usual}➔{p['pos']}): **SOT / Shots**")
                 elif u_z in ['A', 'M'] and c_z == 'D':
                     alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card**")
-        res = "🚨 **EDGES:**\n\n" + ("\n".join(alerts) if alerts else "✅ No changes.")
+        res = "🚨 **EDGES:**\n\n" + ("\n".join(alerts) if alerts else "✅ No changes detected.")
         await q.message.reply_text(res, parse_mode='Markdown')
 
 def main():
