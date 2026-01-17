@@ -12,7 +12,7 @@ from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- LOGGING SETUP ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
@@ -60,37 +60,46 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- IMPROVED SCRAPER LOGIC ---
+# --- ULTIMATE SCRAPER LOGIC ---
 def get_league_matches(league_id):
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        logger.info(f"Scraping FotMob for league {league_id}...")
+        logger.info(f"🚀 Fetching data for league {league_id}...")
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
         
-        # Try different paths in the JSON where FotMob stores match data
-        matches = data.get('matches', {}).get('allMatches', [])
-        if not matches:
-            matches = data.get('overview', {}).get('leagueMatches', [])
+        # We search every possible list where matches might be hidden
+        all_possible_lists = [
+            data.get('matches', {}).get('allMatches', []),
+            data.get('overview', {}).get('leagueMatches', []),
+            data.get('matches', {}).get('firstUnplayed', [])
+        ]
+        
+        # Flatten all lists into one big group of matches
+        combined_matches = [item for sublist in all_possible_lists for item in sublist]
         
         today_str = datetime.now().strftime('%Y-%m-%d')
         found_today = []
-        
-        for m in matches:
+        seen_ids = set() # Avoid duplicates
+
+        for m in combined_matches:
+            m_id = m.get('id')
             utc_time = m.get('status', {}).get('utcTime', '')
-            # Filter matches happening TODAY
-            if today_str in utc_time:
+            
+            # Check if match is today and not a duplicate
+            if today_str in utc_time and m_id not in seen_ids:
                 found_today.append({
-                    'id': m.get('id'),
+                    'id': m_id,
                     'home': m.get('home', {}).get('name'),
                     'away': m.get('away', {}).get('name')
                 })
+                seen_ids.add(m_id)
         
-        logger.info(f"Success: Found {len(found_today)} matches for {today_str}")
+        logger.info(f"✅ Success: Found {len(found_today)} matches for today ({today_str})")
         return found_today
     except Exception as e:
-        logger.error(f"Error fetching matches: {e}")
+        logger.error(f"❌ Scraper Error: {e}")
         return []
 
 def scrape_lineup(match_id):
@@ -116,7 +125,7 @@ def scrape_lineup(match_id):
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await update.message.reply_text("🔍 **Select a League:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text("🔍 **Select a League to check today's games:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -128,7 +137,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not matches:
             try:
-                await query.edit_message_text(f"📭 No matches found for today. (Checked {datetime.now().strftime('%H:%M')})")
+                await query.edit_message_text(f"📭 No games found in the schedule for today ({datetime.now().strftime('%Y-%m-%d')}).")
             except BadRequest: pass
             return
 
@@ -137,14 +146,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest: pass
 
         for m in matches:
-            btn = [[InlineKeyboardButton("📋 Analyze", callback_data=f"an_{m['id']}")]]
+            btn = [[InlineKeyboardButton("📋 Analyze Lineup", callback_data=f"an_{m['id']}")]]
             await query.message.reply_text(f"🏟 {m['home']} vs {m['away']}", reply_markup=InlineKeyboardMarkup(btn))
 
     elif query.data.startswith("an_"):
         m_id = query.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await query.message.reply_text("⏳ Lineups not out yet.")
+            await query.message.reply_text("⏳ Lineups are not available yet. (Usually 60m before KO)")
             return
         
         update_player_knowledge(lineup)
@@ -158,7 +167,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif u_zone in ['A', 'M'] and c_zone == 'D':
                     alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card Risk**")
         
-        res = "🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ No position changes detected.")
+        res = f"🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ All players in usual positions.")
         await query.message.reply_text(res, parse_mode='Markdown')
 
 def main():
