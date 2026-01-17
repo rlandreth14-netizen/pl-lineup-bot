@@ -60,34 +60,33 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- ULTIMATE SCRAPER LOGIC ---
+# --- IMPROVED SCRAPER LOGIC ---
 def get_league_matches(league_id):
+    # We fetch the specific league matches endpoint which is more stable
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
     try:
-        logger.info(f"🚀 Fetching data for league {league_id}...")
+        logger.info(f"🚀 Fetching matches for league {league_id}...")
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
         
-        # We search every possible list where matches might be hidden
-        all_possible_lists = [
-            data.get('matches', {}).get('allMatches', []),
-            data.get('overview', {}).get('leagueMatches', []),
-            data.get('matches', {}).get('firstUnplayed', [])
-        ]
-        
-        # Flatten all lists into one big group of matches
-        combined_matches = [item for sublist in all_possible_lists for item in sublist]
-        
+        # FotMob stores matches in different places depending on the league/state
+        matches_data = []
+        if 'matches' in data:
+            matches_data = data['matches'].get('allMatches', [])
+        if not matches_data and 'overview' in data:
+            matches_data = data['overview'].get('leagueMatches', [])
+            
         today_str = datetime.now().strftime('%Y-%m-%d')
         found_today = []
-        seen_ids = set() # Avoid duplicates
+        seen_ids = set()
 
-        for m in combined_matches:
+        for m in matches_data:
             m_id = m.get('id')
-            utc_time = m.get('status', {}).get('utcTime', '')
+            # Check the status date or the time string
+            utc_time = str(m.get('status', {}).get('utcTime', ''))
             
-            # Check if match is today and not a duplicate
             if today_str in utc_time and m_id not in seen_ids:
                 found_today.append({
                     'id': m_id,
@@ -96,10 +95,10 @@ def get_league_matches(league_id):
                 })
                 seen_ids.add(m_id)
         
-        logger.info(f"✅ Success: Found {len(found_today)} matches for today ({today_str})")
+        logger.info(f"✅ Found {len(found_today)} matches for {today_str}")
         return found_today
     except Exception as e:
-        logger.error(f"❌ Scraper Error: {e}")
+        logger.error(f"❌ Scraper error: {e}")
         return []
 
 def scrape_lineup(match_id):
@@ -108,7 +107,10 @@ def scrape_lineup(match_id):
     try:
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.content, 'html.parser')
-        data = json.loads(soup.find('script', id='__NEXT_DATA__').string)
+        script_tag = soup.find('script', id='__NEXT_DATA__')
+        if not script_tag: return None
+        
+        data = json.loads(script_tag.string)
         content = data['props']['pageProps']['content']
         
         if 'lineup' not in content or not content['lineup']:
@@ -116,8 +118,9 @@ def scrape_lineup(match_id):
             
         players = []
         for side in ['home', 'away']:
-            if side in content['lineup'] and 'starting' in content['lineup'][side]:
-                for p in content['lineup'][side]['starting']:
+            lineup_side = content['lineup'].get(side, {})
+            if 'starting' in lineup_side:
+                for p in lineup_side['starting']:
                     players.append({'name': p['name']['fullName'], 'pos': p.get('positionStringShort', '??')})
         return players
     except: return None
@@ -125,7 +128,7 @@ def scrape_lineup(match_id):
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await update.message.reply_text("🔍 **Select a League to check today's games:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text("🔍 **Select a League:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -137,7 +140,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not matches:
             try:
-                await query.edit_message_text(f"📭 No games found in the schedule for today ({datetime.now().strftime('%Y-%m-%d')}).")
+                await query.edit_message_text(f"📭 No matches found for today ({datetime.now().strftime('%Y-%m-%d')}).")
             except BadRequest: pass
             return
 
@@ -153,7 +156,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m_id = query.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await query.message.reply_text("⏳ Lineups are not available yet. (Usually 60m before KO)")
+            await query.message.reply_text("⏳ Lineups not out yet (60m before KO).")
             return
         
         update_player_knowledge(lineup)
@@ -163,11 +166,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if usual and usual != p['pos']:
                 u_zone, c_zone = POSITION_GROUPS.get(usual, 'M'), POSITION_GROUPS.get(p['pos'], 'M')
                 if u_zone == 'D' and c_zone in ['M', 'A']:
-                    alerts.append(f"🎯 **{p['name']}** ({usual}➔{p['pos']}): **SOT / Over 0.5 Shots**")
+                    alerts.append(f"🎯 **{p['name']}** ({usual}➔{p['pos']}): **SOT / Shots**")
                 elif u_zone in ['A', 'M'] and c_zone == 'D':
-                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card Risk**")
+                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card**")
         
-        res = f"🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ All players in usual positions.")
+        res = "🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ No changes detected.")
         await query.message.reply_text(res, parse_mode='Markdown')
 
 def main():
