@@ -20,7 +20,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 PORT = int(os.getenv("PORT", 8000))
 
-# Database Connection
+# Database Connection - Forcing the 'football_bot' database name
 client = MongoClient(MONGO_URI)
 db = client['football_bot']
 player_collection = db['player_history']
@@ -60,79 +60,75 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- NEW ROBUST SCRAPER LOGIC ---
+# --- ROBUST MATCH SCRAPER ---
 def get_league_matches(league_id):
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
     try:
-        logger.info(f"🚀 Scraping all data for league {league_id}...")
         response = requests.get(url, headers=headers, timeout=15)
         data = response.json()
         
-        # We search everywhere for matches (matches, overview, fixtures, etc.)
         def find_matches_in_dict(obj):
             found = []
             if isinstance(obj, dict):
-                if 'home' in obj and 'away' in obj and 'id' in obj:
-                    found.append(obj)
-                for k, v in obj.items():
-                    found.extend(find_matches_in_dict(v))
+                if 'home' in obj and 'away' in obj and 'id' in obj: found.append(obj)
+                for v in obj.values(): found.extend(find_matches_in_dict(v))
             elif isinstance(obj, list):
-                for item in obj:
-                    found.extend(find_matches_in_dict(item))
+                for item in obj: found.extend(find_matches_in_dict(item))
             return found
 
         all_matches = find_matches_in_dict(data)
-        
         today_str = datetime.now().strftime('%Y-%m-%d')
-        found_today = []
-        seen_ids = set()
+        found_today, seen_ids = [], set()
 
         for m in all_matches:
             m_id = m.get('id')
-            # Look for today's date in any time field
             utc_time = str(m.get('status', {}).get('utcTime', '')) or str(m.get('time', ''))
-            
             if today_str in utc_time and m_id not in seen_ids:
-                found_today.append({
-                    'id': m_id,
-                    'home': m.get('home', {}).get('name') if isinstance(m['home'], dict) else m['home'],
-                    'away': m.get('away', {}).get('name') if isinstance(m['away'], dict) else m['away']
-                })
+                h_name = m['home']['name'] if isinstance(m['home'], dict) else m['home']
+                a_name = m['away']['name'] if isinstance(m['away'], dict) else m['away']
+                found_today.append({'id': m_id, 'home': h_name, 'away': a_name})
                 seen_ids.add(m_id)
-        
-        logger.info(f"✅ Success: Found {len(found_today)} matches for {today_str}")
         return found_today
-    except Exception as e:
-        logger.error(f"❌ Scraper error: {e}")
-        return []
+    except: return []
 
+# --- IMPROVED LINEUP SCRAPER ---
 def scrape_lineup(match_id):
-    url = f"https://www.fotmob.com/matches/{match_id}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # API endpoint is much more reliable than scraping the HTML page
+    url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.content, 'html.parser')
-        script = soup.find('script', id='__NEXT_DATA__')
-        data = json.loads(script.string)
-        content = data['props']['pageProps']['content']
+        logger.info(f"🔍 Fetching lineup API for match {match_id}")
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
         
-        if 'lineup' not in content or not content['lineup']: return None
+        content = data.get('content', {})
+        lineup_data = content.get('lineup', {})
+        
+        if not lineup_data or 'lineup' not in lineup_data:
+            return None
             
         players = []
+        # FotMob uses a nested 'lineup' -> 'lineup' structure in this API
         for side in ['home', 'away']:
-            l = content['lineup'].get(side, {})
-            if 'starting' in l:
-                for p in l['starting']:
-                    players.append({'name': p['name']['fullName'], 'pos': p.get('positionStringShort', '??')})
-        return players
-    except: return None
+            team_lineup = lineup_data.get('lineup', [{}, {}])[0 if side == 'home' else 1]
+            # Check starting XI
+            for squad_part in team_lineup.get('players', []):
+                for p in squad_part:
+                    players.append({
+                        'name': p.get('name', {}).get('fullName', 'Unknown'),
+                        'pos': p.get('positionShort', '??')
+                    })
+        
+        return players if players else None
+    except Exception as e:
+        logger.error(f"❌ Lineup API Error: {e}")
+        return None
 
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await update.message.reply_text("🔍 **Football Analyzer Live:**\nChoose a league to find today's edges:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.message.reply_text("🔍 **Football Analyzer:** Choose a league:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -141,15 +137,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("list_"):
         l_id = query.data.split("_")[1]
         matches = get_league_matches(l_id)
-        
         if not matches:
-            try: await query.edit_message_text(f"📭 No matches found for today ({datetime.now().strftime('%Y-%m-%d')}).")
-            except BadRequest: pass
+            await query.edit_message_text(f"📭 No matches found for today.")
             return
-
-        try: await query.edit_message_text("⬇️ **Select a match to analyze:**", parse_mode='Markdown')
-        except BadRequest: pass
-
+        await query.edit_message_text("⬇️ **Select a match:**", parse_mode='Markdown')
         for m in matches:
             btn = [[InlineKeyboardButton("📋 Analyze Lineup", callback_data=f"an_{m['id']}")]]
             await query.message.reply_text(f"🏟 **{m['home']} vs {m['away']}**", reply_markup=InlineKeyboardMarkup(btn), parse_mode='Markdown')
@@ -158,7 +149,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m_id = query.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await query.message.reply_text("⏳ Lineups not out yet (60m before KO).")
+            await query.message.reply_text("⏳ Lineups not confirmed yet.")
             return
         
         update_player_knowledge(lineup)
@@ -172,7 +163,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif u_zone in ['A', 'M'] and c_zone == 'D':
                     alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']}): **Fouls / Card**")
         
-        res = "🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ No position changes detected.")
+        res = "🚨 **EDGES FOUND:**\n\n" + ("\n".join(alerts) if alerts else "✅ No position changes.")
         await query.message.reply_text(res, parse_mode='Markdown')
 
 def main():
@@ -180,7 +171,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("✅ Bot is fully operational and listening...")
+    logger.info("✅ Bot is listening...")
     app.run_polling()
 
 if __name__ == '__main__':
