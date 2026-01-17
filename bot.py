@@ -7,7 +7,6 @@ from datetime import datetime
 from pymongo import MongoClient
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- LOGGING ---
@@ -47,79 +46,81 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- UNIVERSAL PLAYER FINDER ---
-def extract_players_recursive(data):
-    found_players = []
-    if isinstance(data, dict):
-        # Check if this dict represents a player
-        name_obj = data.get('name')
-        name = name_obj.get('fullName') if isinstance(name_obj, dict) else name_obj
-        pos = data.get('positionShort') or data.get('position')
+# --- RECURSIVE PLAYER EXTRACTOR ---
+def find_players_in_json(obj):
+    players = []
+    if isinstance(obj, dict):
+        # Match pattern for FotMob player objects
+        if ('name' in obj and 'position' in obj) or ('name' in obj and 'positionShort' in obj):
+            name_data = obj.get('name')
+            full_name = name_data.get('fullName') if isinstance(name_data, dict) else name_data
+            pos = obj.get('positionShort') or obj.get('position')
+            # isFirstEleven is true for starters, false for subs
+            if full_name and pos and obj.get('isFirstEleven', False):
+                players.append({'name': full_name, 'pos': pos})
         
-        # Only add if it's a starter (isFirstEleven is often a key in the API)
-        if name and pos and data.get('isFirstEleven', True):
-            found_players.append({'name': name, 'pos': pos})
-        
-        for v in data.values():
-            found_players.extend(extract_players_recursive(v))
-    elif isinstance(data, list):
-        for item in data:
-            found_players.extend(extract_players_recursive(item))
-    return found_players
+        for value in obj.values():
+            players.extend(find_players_in_json(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            players.extend(find_players_in_json(item))
+    return players
 
-# --- SCRAPER (MATCHES) ---
+# --- SCRAPERS ---
 def get_league_matches(league_id):
     url = f"https://www.fotmob.com/api/leagues?id={league_id}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     try:
         data = requests.get(url, headers=headers, timeout=10).json()
-        def find_m(obj):
-            res = []
-            if isinstance(obj, dict):
-                if 'home' in obj and 'away' in obj and 'id' in obj: res.append(obj)
-                for v in obj.values(): res.extend(find_m(v))
-            elif isinstance(obj, list):
-                for i in obj: res.extend(find_m(i))
-            return res
         today = datetime.now().strftime('%Y-%m-%d')
         matches, seen = [], set()
-        for m in find_m(data):
-            m_id = m.get('id')
-            time_str = str(m.get('status', {}).get('utcTime', '')) or str(m.get('time', ''))
-            if today in time_str and m_id not in seen:
-                h = m['home']['name'] if isinstance(m['home'], dict) else m['home']
-                a = m['away']['name'] if isinstance(m['away'], dict) else m['away']
-                matches.append({'id': m_id, 'home': h, 'away': a})
-                seen.add(m_id)
+        
+        def search_m(o):
+            if isinstance(o, dict):
+                if 'home' in o and 'away' in o and 'id' in o:
+                    m_id = o['id']
+                    time_val = str(o.get('status', {}).get('utcTime', '')) or str(o.get('time', ''))
+                    if today in time_val and m_id not in seen:
+                        h = o['home']['name'] if isinstance(o['home'], dict) else o['home']
+                        a = o['away']['name'] if isinstance(o['away'], dict) else o['away']
+                        matches.append({'id': m_id, 'home': h, 'away': a})
+                        seen.add(m_id)
+                for v in o.values(): search_m(v)
+            elif isinstance(o, list):
+                for i in o: search_m(i)
+        
+        search_m(data)
         return matches
     except: return []
 
-# --- SCRAPER (LINEUPS) ---
 def scrape_lineup(match_id):
     url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
     try:
-        logger.info(f"🔍 Deep-scanning API for match {match_id}")
-        data = requests.get(url, headers=headers, timeout=10).json()
+        logger.info(f"🔍 Deep API Scan: {match_id}")
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
         
-        # We only care about the lineup section to avoid bench players
-        lineup_root = data.get('content', {}).get('lineup', {})
-        all_players = extract_players_recursive(lineup_root)
+        # Scrape starters using the recursive finder
+        all_found = find_players_in_json(data)
         
-        # Filter duplicates (sometimes API lists them twice in different formats)
-        unique_players = {p['name']: p for p in all_players}.values()
+        # Remove duplicates
+        unique_list = {p['name']: p for p in all_found}.values()
         
-        if len(unique_players) < 11:
-            logger.warning(f"⚠️ Only {len(unique_players)} players found for {match_id}. Probably not out yet.")
+        if len(unique_list) < 15: # Expecting 22, but 15+ is a safe 'found' threshold
+            logger.warning(f"⚠️ Only {len(unique_list)} players found. Lineup likely not official.")
             return None
             
-        logger.info(f"✅ Successfully found {len(unique_players)} players.")
-        return list(unique_players)
+        logger.info(f"✅ Found {len(unique_list)} starting players.")
+        return list(unique_list)
     except Exception as e:
-        logger.error(f"❌ Scraper failure: {e}")
+        logger.error(f"❌ Scraper Error: {e}")
         return None
 
-# --- TELEGRAM HANDLERS ---
+# --- TELEGRAM ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
     await u.message.reply_text("🔍 **Football Edge Finder:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -141,7 +142,7 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         m_id = q.data.split("_")[1]
         lineup = scrape_lineup(m_id)
         if not lineup:
-            await q.message.reply_text("⏳ Lineups not confirmed yet (Check ~60m before KO).")
+            await q.message.reply_text("⏳ Lineups not confirmed (usually 60m before kick-off).")
             return
         update_player_knowledge(lineup)
         alerts = []
