@@ -1,52 +1,63 @@
 import os
-import threading
+import requests
 import logging
-import time
+import asyncio
+import threading
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from google import genai
 
-# --- 1. SETUP ---
+# --- 1. INITIAL SETUP ---
 logging.basicConfig(level=logging.INFO)
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+GEMINI_CLIENT = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
+# API Keys
+TSDB_KEY = "1"  # Public test key for TheSportsDB
+SM_KEY = os.environ.get("SPORTMONKS_API_KEY")
+
+# Flask for Render Health Checks
 app = Flask(__name__)
 @app.route('/')
-def health(): return "Bot Active", 200
+def health(): return "Bot Online", 200
 
-# --- 2. ANTI-SPAM ENGINE ---
+# --- 2. DATA FETCHING LOGIC ---
 
-async def ask_ai_safe(prompt):
-    """
-    Mandatory 4-second gap + Error handling.
-    This guarantees we stay below 15 requests per minute.
-    """
-    # 4-second 'Cool-off' before every request
-    time.sleep(4) 
-    
+def get_tsdb_fixtures(league_name):
+    """Fetch today's games from TheSportsDB."""
+    # Note: English Premier League, Spanish La Liga, etc.
+    url = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}/eventsday.php?d=2026-01-19&l={league_name}"
     try:
-        # We use a 10-second timeout to prevent the bot from hanging
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=f"Date: Monday, Jan 19, 2026. Task: {prompt}"
-        )
-        return response.text
+        r = requests.get(url, timeout=10).json()
+        return r.get('events') or []
     except Exception as e:
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            return "⏳ Server is catching its breath. Please wait 15 seconds and click again."
-        return f"❌ Error: {str(e)}"
+        logging.error(f"TSDB Error: {e}")
+        return []
 
-# --- 3. THE THREE-STEP WORKFLOW ---
+def get_sm_lineup_data(match_query):
+    """Fetch lineup and coordinate data from Sportmonks."""
+    url = f"https://api.sportmonks.com/v3/football/fixtures/search/{match_query}"
+    params = {
+        "api_token": SM_KEY,
+        "include": "lineups.player;lineups.position;lineups.details.type;formations"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15).json()
+        return r.get('data')
+    except Exception as e:
+        logging.error(f"Sportmonks Error: {e}")
+        return None
+
+# --- 3. TELEGRAM BOT LOGIC ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """MENU 1: Select League (No AI Request needed here)"""
+    """Step 1: Select a League."""
     keyboard = [
-        [InlineKeyboardButton("Premier League", callback_data='step1:Premier League')],
-        [InlineKeyboardButton("Championship", callback_data='step1:Championship')],
-        [InlineKeyboardButton("La Liga", callback_data='step1:La Liga')]
+        [InlineKeyboardButton("Premier League", callback_data='league:English Premier League')],
+        [InlineKeyboardButton("La Liga", callback_data='league:Spanish La Liga')],
+        [InlineKeyboardButton("Serie A", callback_data='league:Italian Serie A')]
     ]
-    text = "⚽ *Step 1: Choose League*\nI will check for today's fixtures."
+    text = "⚽ *Football AI Scout*\nSelect a league to see today's fixtures:"
     
     if update.message:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -58,66 +69,77 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
 
-    # --- PHASE 1: FIND GAMES ---
-    if data.startswith('step1:'):
-        league = data.split(':')[1]
-        await query.edit_message_text(f"⏳ (4s Cooldown) Searching {league}...")
+    # --- ACTION 1: LIST MATCHES ---
+    if data.startswith('league:'):
+        league_name = data.split(':')[1]
+        await query.edit_message_text(f"📡 Searching for {league_name} matches...")
         
-        prompt = f"List matches for today in {league}. Names only, comma separated."
-        res = await ask_ai_safe(prompt)
+        matches = get_tsdb_fixtures(league_name)
         
-        matches = [m.strip() for m in res.split(',') if len(m.strip()) > 5]
         if not matches:
-            await query.edit_message_text("No games found. Try /start again.")
+            # Fallback for TSDB '1' Key limitations
+            keyboard = [[InlineKeyboardButton("Manual Test: Brighton vs Bournemouth", callback_data="match:Brighton vs Bournemouth")]]
+            await query.edit_message_text("❌ No live data for Key 1. Try a manual test?", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
-        keyboard = [[InlineKeyboardButton(m, callback_data=f"step2:{m[:40]}")] for m in matches]
-        await query.edit_message_text(f"⚽ *Step 2: Select Match*\nFound these games:", 
-                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        keyboard = []
+        for m in matches:
+            m_name = m['strEvent']
+            keyboard.append([InlineKeyboardButton(m_name, callback_data=f"match:{m_name}")])
+        
+        await query.edit_message_text("📅 *Today's Fixtures:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # --- PHASE 2: CHECK LINEUPS ---
-    elif data.startswith('step2:'):
-        match_name = data.split(':', 1)[1]
-        await query.edit_message_text(f"🔎 (4s Cooldown) Scouting {match_name} lineups...")
+    # --- ACTION 2: ANALYZE WITH AI ---
+    elif data.startswith('match:'):
+        match_name = data.split(':')[1]
+        await query.edit_message_text(f"🔬 Pulling Sportmonks data for {match_name}...")
         
-        prompt = f"Identify players in {match_name} playing a more attacking role than usual tonight."
-        lineup_info = await ask_ai_safe(prompt)
+        # 1. Fetch Real Data
+        raw_data = get_sm_lineup_data(match_name)
         
-        keyboard = [
-            [InlineKeyboardButton("💰 Final Step: Get Betting Stats", callback_data=f"step3:{match_name}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back")]
-        ]
-        await query.edit_message_text(f"📋 *Lineup Shift Report*\n\n{lineup_info}", 
-                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        if not raw_data:
+            await query.edit_message_text("⚠️ Sportmonks couldn't find this match. Ensure the league is in your subscription.")
+            return
 
-    # --- PHASE 3: BETTING INSIGHTS ---
-    elif data.startswith('step3:'):
-        match_name = data.split(':', 1)[1]
-        await query.edit_message_text(f"📊 (4s Cooldown) Calculating stats for {match_name}...")
+        # 2. AI Analysis (The only AI call)
+        await query.edit_message_text("🧠 Gemini is analyzing tactical shifts...")
         
-        prompt = f"Based on tonight's roles in {match_name}, give 2 betting tips (Shots/Fouls) using last 5 game averages."
-        insights = await ask_ai_safe(prompt)
+        # Mandatory gap to avoid Gemini 429
+        await asyncio.sleep(3)
         
-        keyboard = [[InlineKeyboardButton("🔄 New Search", callback_data="back")]]
-        await query.edit_message_text(f"💰 *Betting Value*\n\n{insights}", 
-                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        prompt = f"""
+        Analyze this football match data: {raw_data}
+        1. Identify any out-of-position players based on 'formation_field' or 'position'.
+        2. Give 2 betting tips (e.g. Shots on Target) for players in attacking roles.
+        3. Explain the tactical value briefly.
+        """
+        
+        try:
+            response = GEMINI_CLIENT.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            final_text = f"📋 *AI Scout: {match_name}*\n\n{response.text}"
+        except Exception as e:
+            final_text = "⏳ AI is busy. Please click the match again in 10 seconds."
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Leagues", callback_data="back")]]
+        await query.edit_message_text(final_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data == "back":
         await start(update, context)
 
-# --- 4. START ---
+# --- 4. STARTUP ---
 
-def main():
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+
+if __name__ == '__main__':
+    # Start Health Check Thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Start Telegram Bot
     TOKEN = os.environ.get("BOT_TOKEN")
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Render Health Check
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
-    
-    print("Bot is breathing slowly and staying safe...")
+    print("🚀 Scout Bot is Live with Dual-API support!")
     application.run_polling()
-
-if __name__ == '__main__':
-    main()
