@@ -7,13 +7,15 @@ from flask import Flask
 from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import time  # Added for rate limiting delays
 
 # --- 1. SETUP & CONFIG ---
 logging.basicConfig(level=logging.INFO)
 
 # Disguise the bot as a real Chrome browser
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "x-fm-req": os.environ.get("FM_REQ_TOKEN", "PASTE_YOUR_X_FM_REQ_TOKEN_HERE")  # Get this from browser DevTools on fotmob.com (see Network tab for API calls)
 }
 
 # MongoDB Setup
@@ -28,6 +30,16 @@ app = Flask(__name__)
 @app.route('/')
 def health(): return "Bot Active", 200
 
+# League mappings (based on FotMob IDs - adjust if needed)
+target_leagues = [47, 42, 87, 54, 55]
+league_names = {
+    47: "Premier League",
+    42: "EFL Championship",  # Assuming 42 is Championship; confirm with FotMob
+    87: "La Liga",
+    54: "Bundesliga",
+    55: "Serie A"
+}
+
 # --- 2. CACHING & STATS LOGIC ---
 
 async def get_player_form(player_id):
@@ -40,7 +52,6 @@ async def get_player_form(player_id):
 
     url = f"https://www.fotmob.com/api/playerData?id={player_id}"
     try:
-        # Added HEADERS and timeout
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
             return "⚠️ Stats currently restricted."
@@ -69,23 +80,31 @@ async def get_player_form(player_id):
 
 # --- 3. ANALYZE LINEUPS LOGIC ---
 
-async def analyze_lineups(query):
-    url = "https://www.fotmob.com/api/allmatches?timezone=Europe/London"
+async def analyze_lineups(query, league_id=None):
+    today = datetime.utcnow().strftime("%Y%m%d")
+    url = f"https://www.fotmob.com/api/matches?date={today}"
     
     try:
-        # Added HEADERS to bypass basic bot protection
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
             await query.edit_message_text(f"⚠️ API Error: {response.status_code}. Fotmob may be limiting requests.")
             return
         matches_data = response.json()
+    except requests.exceptions.JSONDecodeError:
+        logging.error(f"Invalid JSON: {response.text[:200]}")
+        await query.edit_message_text("⚠️ Invalid data from API—FotMob may have changed formats.")
+        return
     except Exception as e:
         logging.error(f"Main API Error: {e}")
         await query.edit_message_text("❌ Connection failed. Please try again in a few moments.")
         return
     
-    target_leagues = [47, 42, 87, 54, 55] 
     leagues = [l for l in matches_data.get('leagues', []) if l['id'] in target_leagues]
+    if league_id:
+        leagues = [l for l in leagues if l['id'] == int(league_id)]
+        if not leagues:
+            await query.edit_message_text("❌ No data for the selected league today.")
+            return
     
     alerts = []
     MARKETS = {
@@ -100,12 +119,11 @@ async def analyze_lineups(query):
                 m_id = match['id']
                 try:
                     m_url = f"https://www.fotmob.com/api/matchDetails?matchId={m_id}"
-                    # Added HEADERS to match details request
                     m_res = requests.get(m_url, headers=HEADERS, timeout=10)
                     if m_res.status_code != 200: continue
                     
                     details = m_res.json()
-                    lineups = details.get('content', {}).get('lineup', {}).get('lineup', [])
+                    lineups = details.get('content', {}).get('lineup', {}).get('lineups', [])  # Fixed to 'lineups' plural
                     
                     for team in lineups:
                         t_name = team.get('teamName')
@@ -134,6 +152,7 @@ async def analyze_lineups(query):
                                     if alert_msg:
                                         form = await get_player_form(p_id)
                                         alerts.append(f"{alert_msg}\n{market_tip}\n*Last 5 Form:*\n{form}")
+                    time.sleep(2)  # Added delay to avoid rate limiting/bans
                 except Exception as e:
                     logging.error(f"Error processing match {m_id}: {e}")
                     continue
@@ -147,15 +166,27 @@ async def analyze_lineups(query):
 # --- 4. BOT HANDLERS & SERVER ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("🔍 Analyze Today's Lineups", callback_data='analyze')]]
-    await update.message.reply_text("Football IQ Bot Online. Monitoring lineups...", reply_markup=InlineKeyboardMarkup(kb))
+    kb = []
+    for lid in target_leagues:
+        name = league_names.get(lid, f"League {lid}")
+        kb.append([InlineKeyboardButton(name, callback_data=f'league:{lid}')])
+    await update.message.reply_text("Football IQ Bot Online. Choose a league to monitor:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == 'analyze':
+    data = query.data
+    
+    if data.startswith('league:'):
+        league_id = data.split(':')[1]
+        name = league_names.get(int(league_id), f"League {league_id}")
+        kb = [[InlineKeyboardButton("🔍 Analyze Today's Lineups", callback_data=f'analyze:{league_id}')]]
+        await query.edit_message_text(f"Selected {name}.", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith('analyze:'):
+        league_id = data.split(':')[1]
         await query.edit_message_text("⏳ Scanning live data...")
-        await analyze_lineups(query)
+        await analyze_lineups(query, league_id=league_id)
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
