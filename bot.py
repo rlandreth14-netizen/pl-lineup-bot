@@ -16,30 +16,42 @@ logger = logging.getLogger(__name__)
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-PORT = int(os.getenv("PORT", 10000)) # Render uses 10000 by default
+# Render uses port 10000 for web services
+PORT = int(os.getenv("PORT", 10000))
 
 client = MongoClient(MONGO_URI)
 db = client['football_bot']
 player_collection = db['player_history']
 
 LEAGUE_MAP = {"pl": 47, "championship": 48, "laliga": 87, "seriea": 55, "bundesliga": 54, "ligue1": 53}
-POSITION_GROUPS = {'GK': 'G', 'CB': 'D', 'LCB': 'D', 'RCB': 'D', 'LB': 'D', 'RB': 'D', 'LWB': 'W', 'RWB': 'W', 'LM': 'W', 'RM': 'W', 'LW': 'W', 'RW': 'W', 'CDM': 'M', 'LDM': 'M', 'RDM': 'M', 'CM': 'M', 'LCM': 'M', 'RCM': 'M', 'CAM': 'M', 'AM': 'M', 'ST': 'A', 'CF': 'A'}
+POSITION_GROUPS = {
+    'GK': 'G', 'CB': 'D', 'LCB': 'D', 'RCB': 'D', 'LB': 'D', 'RB': 'D', 
+    'LWB': 'W', 'RWB': 'W', 'LM': 'W', 'RM': 'W', 'LW': 'W', 'RW': 'W', 
+    'CDM': 'M', 'LDM': 'M', 'RDM': 'M', 'CM': 'M', 'LCM': 'M', 'RCM': 'M', 
+    'CAM': 'M', 'AM': 'M', 'ST': 'A', 'CF': 'A'
+}
 
-# --- HEALTH SERVER (To keep Render awake) ---
+# --- HEALTH SERVER (Crucial for Render & UptimeRobot) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"Bot is Healthy")
 
 def run_health_server():
-    logger.info(f"📡 Health server starting on port {PORT}")
-    HTTPServer(('0.0.0.0', PORT), HealthCheckHandler).serve_forever()
+    logger.info(f"📡 Starting Health Server on port {PORT}")
+    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    server.serve_forever()
 
-# --- DATABASE ---
+# --- DATABASE LOGIC ---
 def update_player_knowledge(lineup_data):
     for p in lineup_data:
-        player_collection.update_one({"name": p['name']}, {"$inc": {f"positions.{p['pos']}": 1}}, upsert=True)
+        player_collection.update_one(
+            {"name": p['name']}, 
+            {"$inc": {f"positions.{p['pos']}": 1}}, 
+            upsert=True
+        )
 
 def get_usual_position(player_name):
     player = player_collection.find_one({"name": player_name})
@@ -47,7 +59,7 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- RECURSIVE PLAYER EXTRACTOR (Latest Brute Force Version) ---
+# --- IMPROVED PLAYER EXTRACTOR (Brute Force) ---
 def find_players_in_json(obj):
     players = []
     if isinstance(obj, dict):
@@ -55,6 +67,7 @@ def find_players_in_json(obj):
         pos = obj.get('positionShort') or obj.get('position')
         
         if name_data and pos:
+            # Handle names that are nested dicts or raw strings
             full_name = name_data.get('fullName') if isinstance(name_data, dict) else name_data
             if isinstance(full_name, str) and len(str(pos)) <= 3: 
                 players.append({'name': full_name, 'pos': pos})
@@ -91,33 +104,35 @@ def get_league_matches(league_id):
         
         search_m(data)
         return matches
-    except: return []
+    except Exception as e:
+        logger.error(f"League scrape error: {e}")
+        return []
 
 def scrape_lineup(match_id):
     url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
-        logger.info(f"🔍 Analyzing match {match_id}")
+        logger.info(f"🔍 Scraping Match ID: {match_id}")
         data = requests.get(url, headers=headers, timeout=10).json()
         content = data.get('content', {})
         all_players = find_players_in_json(content.get('lineup', {}))
         
-        # Deduplicate and validate
+        # Deduplicate to avoid processing the same player twice
         unique = {p['name']: p for p in all_players}.values()
         
         if len(unique) >= 11:
-            logger.info(f"✅ Found {len(unique)} players.")
+            logger.info(f"✅ Extracted {len(unique)} players")
             return list(unique)
             
         return None
     except Exception as e:
-        logger.error(f"❌ Scraper error: {e}")
+        logger.error(f"❌ Lineup error: {e}")
         return None
 
-# --- TELEGRAM HANDLERS ---
+# --- BOT INTERFACE ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
-    await u.message.reply_text("🎯 **Football Edge Finder v2.1**\nSelect a league:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    await u.message.reply_text("🎯 **Football Edge Finder**\nSelect a league for today:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
@@ -129,9 +144,9 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         if not matches:
             await q.edit_message_text("📭 No matches found for today.")
             return
-        await q.edit_message_text("🏟 **Select match:**", parse_mode='Markdown')
+        await q.edit_message_text("🏟 **Today's Matches:**", parse_mode='Markdown')
         for m in matches:
-            btn = [[InlineKeyboardButton("📋 Analyze Lineup", callback_data=f"an_{m['id']}")]]
+            btn = [[InlineKeyboardButton("📋 Check Lineup", callback_data=f"an_{m['id']}")]]
             await q.message.reply_text(f"⚽ {m['home']} vs {m['away']}", reply_markup=InlineKeyboardMarkup(btn))
             
     elif q.data.startswith("an_"):
@@ -139,7 +154,7 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
         lineup = scrape_lineup(m_id)
         
         if not lineup:
-            await q.message.reply_text("⏳ **Lineups not confirmed.**")
+            await q.message.reply_text("⏳ **Lineups not yet confirmed.**")
             return
             
         update_player_knowledge(lineup)
@@ -150,19 +165,23 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if usual and usual != p['pos']:
                 u_z, c_z = POSITION_GROUPS.get(usual, 'M'), POSITION_GROUPS.get(p['pos'], 'M')
                 if u_z == 'D' and c_z in ['M', 'A']:
-                    alerts.append(f"🔥 **{p['name']}** ({usual}➔{p['pos']})\n   *Bet: Over Shots*")
+                    alerts.append(f"🔥 **{p['name']}** ({usual}➔{p['pos']})\n   *Edge: Over Shots*")
                 elif u_z in ['A', 'M'] and c_z == 'D':
-                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']})\n   *Bet: Over Fouls*")
+                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']})\n   *Edge: Over Fouls*")
         
-        res = "🚨 **EDGES:**\n\n" + ("\n".join(alerts) if alerts else "✅ No position shifts.")
+        res = "🚨 **LINEUP SHIFTS:**\n\n" + ("\n".join(alerts) if alerts else "✅ No significant shifts.")
         await q.message.reply_text(res, parse_mode='Markdown')
 
 def main():
+    # Start the web server in a background thread
     threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # Start the Telegram Bot
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
-    logger.info("✅ Bot is active...")
+    
+    logger.info("🚀 Bot is live and polling...")
     app.run_polling()
 
 if __name__ == '__main__':
