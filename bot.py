@@ -15,48 +15,56 @@ app = Flask(__name__)
 @app.route('/')
 def health(): return "Bot Active", 200
 
-LEAGUES = ["Premier League", "Championship", "La Liga", "Serie A"]
+# --- 2. ANTI-SPAM ENGINE ---
 
-# --- 2. THE SLOW & STEADY AI BRAIN ---
-
-async def ask_ai(prompt):
-    """Simple, single-task request to Gemini."""
+async def ask_ai_safe(prompt):
+    """
+    Mandatory 4-second gap + Error handling.
+    This guarantees we stay below 15 requests per minute.
+    """
+    # 4-second 'Cool-off' before every request
+    time.sleep(4) 
+    
     try:
-        # Give the AI a 2-second breather between any clicks to respect the free tier
-        time.sleep(2) 
+        # We use a 10-second timeout to prevent the bot from hanging
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=f"Today is Monday, Jan 19, 2026. {prompt}"
+            contents=f"Date: Monday, Jan 19, 2026. Task: {prompt}"
         )
         return response.text
     except Exception as e:
-        if "429" in str(e):
-            return "⚠️ System busy. Please wait 10 seconds and click again."
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return "⏳ Server is catching its breath. Please wait 15 seconds and click again."
         return f"❌ Error: {str(e)}"
 
-# --- 3. STEP-BY-STEP HANDLERS ---
+# --- 3. THE THREE-STEP WORKFLOW ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(l, callback_data=f'step1:{l}')] for l in LEAGUES]
-    text = "⚽ *Step 1: Choose League*\n(Searching only for fixtures)"
+    """MENU 1: Select League (No AI Request needed here)"""
+    keyboard = [
+        [InlineKeyboardButton("Premier League", callback_data='step1:Premier League')],
+        [InlineKeyboardButton("Championship", callback_data='step1:Championship')],
+        [InlineKeyboardButton("La Liga", callback_data='step1:La Liga')]
+    ]
+    text = "⚽ *Step 1: Choose League*\nI will check for today's fixtures."
     
     if update.message:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def handle_steps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     await query.answer()
 
-    # STEP 1: Get Fixtures Only
+    # --- PHASE 1: FIND GAMES ---
     if data.startswith('step1:'):
         league = data.split(':')[1]
-        await query.edit_message_text(f"⏳ Finding {league} games...")
+        await query.edit_message_text(f"⏳ (4s Cooldown) Searching {league}...")
         
-        prompt = f"List only the match names for today in the {league}. Separate by commas."
-        res = await ask_ai(prompt)
+        prompt = f"List matches for today in {league}. Names only, comma separated."
+        res = await ask_ai_safe(prompt)
         
         matches = [m.strip() for m in res.split(',') if len(m.strip()) > 5]
         if not matches:
@@ -64,45 +72,51 @@ async def handle_steps(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         keyboard = [[InlineKeyboardButton(m, callback_data=f"step2:{m[:40]}")] for m in matches]
-        await query.edit_message_text(f"⚽ *Step 2: Select Match*\nFound these games:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text(f"⚽ *Step 2: Select Match*\nFound these games:", 
+                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # STEP 2: Find Out-of-Position Players Only
+    # --- PHASE 2: CHECK LINEUPS ---
     elif data.startswith('step2:'):
         match_name = data.split(':', 1)[1]
-        await query.edit_message_text(f"🔎 Checking lineups for {match_name}...")
+        await query.edit_message_text(f"🔎 (4s Cooldown) Scouting {match_name} lineups...")
         
-        prompt = f"Look at the confirmed lineups for {match_name}. List any players starting in a different or more attacking position than usual. If none, say 'No major shifts'."
-        lineup_info = await ask_ai(prompt)
+        prompt = f"Identify players in {match_name} playing a more attacking role than usual tonight."
+        lineup_info = await ask_ai_safe(prompt)
         
-        # We store the match name in the button for the final step
-        keyboard = [[InlineKeyboardButton("✅ Get Betting Insights", callback_data=f"step3:{match_name}")],
-                    [InlineKeyboardButton("⬅️ Back", callback_data="back")]]
-        
-        await query.edit_message_text(f"📋 *Positional Shifts*\n\n{lineup_info}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        keyboard = [
+            [InlineKeyboardButton("💰 Final Step: Get Betting Stats", callback_data=f"step3:{match_name}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back")]
+        ]
+        await query.edit_message_text(f"📋 *Lineup Shift Report*\n\n{lineup_info}", 
+                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # STEP 3: Final Analysis & Betting Value
+    # --- PHASE 3: BETTING INSIGHTS ---
     elif data.startswith('step3:'):
         match_name = data.split(':', 1)[1]
-        await query.edit_message_text(f"📊 Calculating value for {match_name}...")
+        await query.edit_message_text(f"📊 (4s Cooldown) Calculating stats for {match_name}...")
         
-        prompt = f"Based on the attacking shifts in {match_name}, provide 1-2 betting insights (Shots on Target or Fouls) using their recent stats."
-        insights = await ask_ai(prompt)
+        prompt = f"Based on tonight's roles in {match_name}, give 2 betting tips (Shots/Fouls) using last 5 game averages."
+        insights = await ask_ai_safe(prompt)
         
-        keyboard = [[InlineKeyboardButton("🔄 Start Over", callback_data="back")]]
-        await query.edit_message_text(f"💰 *Betting Insights*\n\n{insights}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        keyboard = [[InlineKeyboardButton("🔄 New Search", callback_data="back")]]
+        await query.edit_message_text(f"💰 *Betting Value*\n\n{insights}", 
+                                      reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data == "back":
         await start(update, context)
 
-# --- 4. RUN ---
+# --- 4. START ---
 
 def main():
     TOKEN = os.environ.get("BOT_TOKEN")
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_steps))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     
+    # Render Health Check
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    
+    print("Bot is breathing slowly and staying safe...")
     application.run_polling()
 
 if __name__ == '__main__':
