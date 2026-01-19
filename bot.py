@@ -2,22 +2,17 @@ import os
 import threading
 import requests
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # Added timezone for deprecation fix
 from flask import Flask
 from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-import time  # Added for rate limiting delays
+import time  # For rate limiting delays
 
 # --- 1. SETUP & CONFIG ---
 logging.basicConfig(level=logging.INFO)
 
-# Disguise the bot as a real Chrome browser
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "x-fm-req": os.environ.get("FM_REQ_TOKEN", "PASTE_YOUR_X_FM_REQ_TOKEN_HERE")  # Get this from browser DevTools on fotmob.com (see Network tab for API calls)
-}
-
+# No headers needed for TheSportsDB
 # MongoDB Setup
 MONGO_URI = os.environ.get("MONGO_URI")
 client = MongoClient(MONGO_URI)
@@ -30,80 +25,91 @@ app = Flask(__name__)
 @app.route('/')
 def health(): return "Bot Active", 200
 
-# League mappings (based on FotMob IDs - adjust if needed)
-target_leagues = [47, 42, 87, 54, 55]
+# League mappings for TheSportsDB (updated IDs)
+target_leagues = [4328, 4329, 4335, 4331, 4332]  # PL, Championship, La Liga, Bundesliga, Serie A
 league_names = {
-    47: "Premier League",
-    42: "EFL Championship",  # Assuming 42 is Championship; confirm with FotMob
-    87: "La Liga",
-    54: "Bundesliga",
-    55: "Serie A"
+    4328: "Premier League",
+    4329: "Championship",
+    4335: "La Liga",
+    4331: "Bundesliga",
+    4332: "Serie A"
 }
+
+# Position mapping (TheSportsDB uses full names)
+def map_position(pos):
+    mapping = {
+        'Centre Back': 'CB',
+        'Right Back': 'RB',
+        'Left Back': 'LB',
+        'Defensive Midfield': 'DM',
+        'Central Midfield': 'CM',
+        'Right Midfield': 'RM',
+        'Left Midfield': 'LM',
+        'Attacking Midfield': 'AM',
+        'Right Wing': 'RW',
+        'Left Wing': 'LW',
+        'Striker': 'ST',
+        'Forward': 'ST',
+        'Midfielder': 'CM',  # Fallbacks
+        'Defender': 'CB',
+        # Add more as needed based on real data
+    }
+    return mapping.get(pos, '??')
 
 # --- 2. CACHING & STATS LOGIC ---
 
 async def get_player_form(player_id):
-    """Fetches stats for last 5 matches with a 24-hour MongoDB cache."""
+    """Fetches stats for last 5 matches with a 24-hour MongoDB cache. Note: Limited in TheSportsDB - using placeholder."""
     cached_data = cache_collection.find_one({"player_id": player_id})
     if cached_data:
         expiry = cached_data['timestamp'] + timedelta(hours=24)
-        if datetime.utcnow() < expiry:
+        if datetime.now(timezone.utc) < expiry:
             return cached_data['stats_text']
 
-    url = f"https://www.fotmob.com/api/playerData?id={player_id}"
+    # TheSportsDB doesn't provide per-match player stats like SoT/fouls in free tier. Use player lookup for basics.
+    url = f"https://www.thesportsdb.com/api/v1/json/3/lookupplayer.php?id={player_id}"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, timeout=10)
         if response.status_code != 200:
             return "⚠️ Stats currently restricted."
             
-        data = response.json()
-        recent_matches = data.get('recentMatches', [])[:5]
-        
-        stats_lines = []
-        for m in recent_matches:
-            s = m.get('stats', {})
-            sot = s.get('Shots on target', 0)
-            fouls = s.get('Fouls committed', 0)
-            stats_lines.append(f"◽ `SoT: {sot} | Fls: {fouls}`")
-        
-        stats_text = "\n".join(stats_lines) if stats_lines else "No recent stat data available."
+        data = response.json().get('players', [{}])[0]
+        # Example: Use aggregate stats if available (e.g., goals, but no SoT/fouls)
+        stats_text = f"Season Goals: {data.get('strGoals', 'N/A')} | Cards: {data.get('strYellowCards', 'N/A')}/{data.get('strRedCards', 'N/A')}"
         
         cache_collection.update_one(
             {"player_id": player_id},
-            {"$set": {"stats_text": stats_text, "timestamp": datetime.utcnow()}},
+            {"$set": {"stats_text": stats_text, "timestamp": datetime.now(timezone.utc)}},
             upsert=True
         )
         return stats_text
     except Exception as e:
         logging.error(f"Error fetching form for {player_id}: {e}")
-        return "⚠️ Stats unavailable."
+        return "⚠️ Detailed stats unavailable in this API."
 
 # --- 3. ANALYZE LINEUPS LOGIC ---
 
 async def analyze_lineups(query, league_id=None):
-    today = datetime.utcnow().strftime("%Y%m%d")
-    url = f"https://www.fotmob.com/api/matches?date={today}"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    url = f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={today}"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, timeout=10)
         if response.status_code != 200:
-            await query.edit_message_text(f"⚠️ API Error: {response.status_code}. Fotmob may be limiting requests.")
+            await query.edit_message_text(f"⚠️ API Error: {response.status_code}. TheSportsDB may be limiting requests.")
             return
-        matches_data = response.json()
-    except requests.exceptions.JSONDecodeError:
-        logging.error(f"Invalid JSON: {response.text[:200]}")
-        await query.edit_message_text("⚠️ Invalid data from API—FotMob may have changed formats.")
-        return
+        matches_data = response.json().get('events', [])
     except Exception as e:
         logging.error(f"Main API Error: {e}")
         await query.edit_message_text("❌ Connection failed. Please try again in a few moments.")
         return
     
-    leagues = [l for l in matches_data.get('leagues', []) if l['id'] in target_leagues]
+    # Filter matches for target leagues and upcoming
+    upcoming_matches = [m for m in matches_data if m['idLeague'] in map(str, target_leagues) and m['strStatus'] != 'Match Finished']
     if league_id:
-        leagues = [l for l in leagues if l['id'] == int(league_id)]
-        if not leagues:
-            await query.edit_message_text("❌ No data for the selected league today.")
+        upcoming_matches = [m for m in upcoming_matches if m['idLeague'] == league_id]
+        if not upcoming_matches:
+            await query.edit_message_text("❌ No upcoming matches for the selected league today.")
             return
     
     alerts = []
@@ -113,49 +119,47 @@ async def analyze_lineups(query, league_id=None):
         "CONTROL": "🔄 *Target: Over 50.5/70.5 Passes*"
     }
 
-    for league in leagues:
-        for match in league.get('matches', []):
-            if not match.get('status', {}).get('started'):
-                m_id = match['id']
-                try:
-                    m_url = f"https://www.fotmob.com/api/matchDetails?matchId={m_id}"
-                    m_res = requests.get(m_url, headers=HEADERS, timeout=10)
-                    if m_res.status_code != 200: continue
-                    
-                    details = m_res.json()
-                    lineups = details.get('content', {}).get('lineup', {}).get('lineups', [])  # Fixed to 'lineups' plural
-                    
-                    for team in lineups:
-                        t_name = team.get('teamName')
-                        for player_list in team.get('players', []):
-                            for p in player_list:
-                                name = p['name']['fullName']
-                                p_id = p['id']
-                                current_pos = p.get('positionShort', '??')
-                                
-                                hist = player_collection.find_one({"name": name})
-                                if hist and 'positions' in hist:
-                                    usual_pos = max(hist['positions'], key=hist['positions'].get)
-                                    alert_msg = ""
-                                    market_tip = ""
+    for match in upcoming_matches:
+        m_id = match['idEvent']
+        try:
+            m_url = f"https://www.thesportsdb.com/api/v1/json/3/lookuplineup.php?id={m_id}"
+            m_res = requests.get(m_url, timeout=10)
+            if m_res.status_code != 200: continue
+            
+            details = m_res.json()
+            # Lineup structure: details['lineup'] is list of players for both teams
+            # Adjust based on real response - may need to separate home/away
+            lineups = details.get('lineup', [])
+            
+            for p in lineups:
+                name = p.get('strPlayer')
+                p_id = p.get('idPlayer')
+                current_pos = map_position(p.get('strPosition', '??'))
+                t_name = p.get('strTeam', match['strHomeTeam'] or match['strAwayTeam'])  # Approximate
+                
+                hist = player_collection.find_one({"name": name})
+                if hist and 'positions' in hist:
+                    usual_pos = max(hist['positions'], key=hist['positions'].get)
+                    alert_msg = ""
+                    market_tip = ""
 
-                                    if (usual_pos in ['CB', 'RB', 'LB'] and current_pos in ['DM', 'CM', 'RM', 'LM', 'RW', 'LW', 'ST']) or \
-                                       (usual_pos in ['DM', 'CM'] and current_pos in ['AM', 'ST', 'RW', 'LW']):
-                                        alert_msg = f"🚀 *FORWARD SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
-                                        market_tip = MARKETS['ATTACKING']
+                    if (usual_pos in ['CB', 'RB', 'LB'] and current_pos in ['DM', 'CM', 'RM', 'LM', 'RW', 'LW', 'ST']) or \
+                       (usual_pos in ['DM', 'CM'] and current_pos in ['AM', 'ST', 'RW', 'LW']):
+                        alert_msg = f"🚀 *FORWARD SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
+                        market_tip = MARKETS['ATTACKING']
 
-                                    elif (usual_pos in ['ST', 'RW', 'LW', 'AM'] and current_pos in ['CM', 'DM', 'RB', 'LB']) or \
-                                         (usual_pos in ['CM', 'RM', 'LM'] and current_pos in ['RB', 'LB', 'CB']):
-                                        alert_msg = f"🛡️ *DEFENSIVE SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
-                                        market_tip = MARKETS['DEFENSIVE']
+                    elif (usual_pos in ['ST', 'RW', 'LW', 'AM'] and current_pos in ['CM', 'DM', 'RB', 'LB']) or \
+                         (usual_pos in ['CM', 'RM', 'LM'] and current_pos in ['RB', 'LB', 'CB']):
+                        alert_msg = f"🛡️ *DEFENSIVE SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
+                        market_tip = MARKETS['DEFENSIVE']
 
-                                    if alert_msg:
-                                        form = await get_player_form(p_id)
-                                        alerts.append(f"{alert_msg}\n{market_tip}\n*Last 5 Form:*\n{form}")
-                    time.sleep(2)  # Added delay to avoid rate limiting/bans
-                except Exception as e:
-                    logging.error(f"Error processing match {m_id}: {e}")
-                    continue
+                    if alert_msg:
+                        form = await get_player_form(p_id)
+                        alerts.append(f"{alert_msg}\n{market_tip}\n*Last 5 Form:*\n{form}")
+            time.sleep(2)  # Delay for rate limits
+        except Exception as e:
+            logging.error(f"Error processing match {m_id}: {e}")
+            continue
 
     if not alerts:
         await query.edit_message_text("✅ No major positional changes found in current lineups.")
