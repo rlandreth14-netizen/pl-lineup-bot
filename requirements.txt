@@ -1,5 +1,3 @@
 python-telegram-bot
 requests
-beautifulsoup4
-pymongo[srv]
-dnspython
+pymongo
