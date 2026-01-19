@@ -15,67 +15,78 @@ app = Flask(__name__)
 @app.route('/')
 def health(): return "Bot Active", 200
 
-# We keep this list just to give the user buttons to click
+# Available leagues for selection
 LEAGUES = ["Premier League", "Championship", "La Liga", "Bundesliga", "Serie A"]
 
-# --- 2. AI BRAIN ---
+# --- 2. AI SCOUT BRAIN (With Fix for Error 429) ---
 
 async def get_ai_response(prompt):
-    """Simple wrapper to talk to Gemini with retry logic for the Free Tier."""
+    """
+    Asks Gemini for info. If it hits the 'Too Many Requests' limit, 
+    it waits and tries again automatically.
+    """
     for attempt in range(3):
         try:
+            # Tell the AI exactly what today's date is for accuracy
+            full_prompt = f"Today is Monday, January 19, 2026. {prompt}"
+            
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
-                contents=f"Current Date: Monday, Jan 19, 2026. {prompt}"
+                contents=full_prompt
             )
             return response.text
         except Exception as e:
-            if "429" in str(e):
-                time.sleep(5)
+            # Check if it's a rate limit error (429)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait_time = 10 * (attempt + 1)
+                logging.warning(f"Limit hit. Waiting {wait_time}s...")
+                time.sleep(wait_time)
                 continue
             return f"❌ AI Error: {str(e)}"
-    return "❌ Rate limit exceeded. Try again in a moment."
+    
+    return "⚠️ AI is currently busy (Rate Limit). Please wait 30 seconds and try again."
 
 # --- 3. BOT HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(name, callback_data=f'league:{name}')] for name in LEAGUES]
-    await update.message.reply_text("⚽ *AI Football Scout*\nChoose a league to see today's matches:", 
-                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    text = "⚽ *AI Football Scout*\nSelect a league to see tonight's fixtures (Jan 19):"
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     await query.answer()
 
-    # Step 1: Find Today's Matches via AI
+    # Step 1: User selects a League
     if data.startswith('league:'):
         league_name = data.split(':')[1]
-        await query.edit_message_text(f"🔍 AI is searching for today's {league_name} fixtures...")
+        await query.edit_message_text(f"🔍 Searching for {league_name} games today...")
         
-        prompt = f"List the matches happening today in the {league_name}. Return ONLY the match names separated by commas (e.g. Team A vs Team B, Team C vs Team D)."
+        prompt = f"List the matches happening today (Jan 19, 2026) in the {league_name}. Return ONLY the match names separated by commas."
         match_data = await get_ai_response(prompt)
         
+        # Split the comma-separated list into buttons
         matches = [m.strip() for m in match_data.split(',') if len(m.strip()) > 5]
         
         if not matches or "❌" in match_data:
-            await query.edit_message_text(f"📝 No {league_name} matches found for today (Jan 19).")
+            await query.edit_message_text(f"📝 No {league_name} matches found for tonight.")
             return
 
         keyboard = [[InlineKeyboardButton(m, callback_data=f"match:{m[:40]}")] for m in matches]
-        await query.edit_message_text(f"📅 *{league_name} Fixtures (Jan 19)*\nSelect a match to scout:", 
+        await query.edit_message_text(f"📅 *{league_name} - Jan 19*\nSelect a match to scout:", 
                                       reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # Step 2: Analyze the Specific Match via AI
+    # Step 2: User selects a Match
     elif data.startswith('match:'):
         match_name = data.split(':', 1)[1]
-        await query.edit_message_text(f"🧠 AI is scouting lineups for {match_name}...")
+        await query.edit_message_text(f"🧠 Scouting lineups for {match_name}...")
         
         prompt = (
-            f"Analyze the match {match_name} for today. "
-            "1. Identify any out-of-position players (e.g. a CB playing DM, or a standard Fullback playing as a Winger). "
-            "2. For these players, provide their average 'Shots on Target' and 'Fouls' from their last 5 games. "
-            "3. Explain why this shift provides betting value."
+            f"Provide a scout report for {match_name} today. "
+            "1. Find any players in the starting lineup playing a more attacking role than usual. "
+            "2. Give their last 5 game averages for 'Shots on Target' and 'Fouls'. "
+            "3. Suggest a betting value based on this shift."
         )
         report = await get_ai_response(prompt)
         
@@ -84,17 +95,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="Markdown")
 
     elif data == "back_to_start":
-        await start(update, context)
+        # Return to main league list
+        keyboard = [[InlineKeyboardButton(name, callback_data=f'league:{name}')] for name in LEAGUES]
+        await query.edit_message_text("⚽ *Select a League:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- 4. START ---
+# --- 4. EXECUTION ---
 
 def main():
     TOKEN = os.environ.get("BOT_TOKEN")
     application = ApplicationBuilder().token(TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
+    # Run a simple server for Render's health check
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    
+    print("Bot is online...")
     application.run_polling()
 
 if __name__ == '__main__':
