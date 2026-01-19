@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-PORT = int(os.getenv("PORT", 8000))
+PORT = int(os.getenv("PORT", 10000)) # Render uses 10000 by default
 
 client = MongoClient(MONGO_URI)
 db = client['football_bot']
@@ -25,7 +25,7 @@ player_collection = db['player_history']
 LEAGUE_MAP = {"pl": 47, "championship": 48, "laliga": 87, "seriea": 55, "bundesliga": 54, "ligue1": 53}
 POSITION_GROUPS = {'GK': 'G', 'CB': 'D', 'LCB': 'D', 'RCB': 'D', 'LB': 'D', 'RB': 'D', 'LWB': 'W', 'RWB': 'W', 'LM': 'W', 'RM': 'W', 'LW': 'W', 'RW': 'W', 'CDM': 'M', 'LDM': 'M', 'RDM': 'M', 'CM': 'M', 'LCM': 'M', 'RCM': 'M', 'CAM': 'M', 'AM': 'M', 'ST': 'A', 'CF': 'A'}
 
-# --- HEALTH SERVER ---
+# --- HEALTH SERVER (To keep Render awake) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -33,6 +33,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Healthy")
 
 def run_health_server():
+    logger.info(f"📡 Health server starting on port {PORT}")
     HTTPServer(('0.0.0.0', PORT), HealthCheckHandler).serve_forever()
 
 # --- DATABASE ---
@@ -46,16 +47,123 @@ def get_usual_position(player_name):
         return max(player['positions'], key=player['positions'].get)
     return None
 
-# --- RECURSIVE PLAYER EXTRACTOR ---
+# --- RECURSIVE PLAYER EXTRACTOR (Latest Brute Force Version) ---
 def find_players_in_json(obj):
     players = []
     if isinstance(obj, dict):
-        # Look for objects that have both a name and a position
-        has_name = 'name' in obj
-        has_pos = 'position' in obj or 'positionShort' in obj
+        name_data = obj.get('name')
+        pos = obj.get('positionShort') or obj.get('position')
         
-        if has_name and has_pos:
-            name_val = obj.get('name')
-            # Extract name from string or dict
-            name = name_val.get('fullName') if isinstance(name_val, dict) else name_val
-            pos = obj.get('positionShort
+        if name_data and pos:
+            full_name = name_data.get('fullName') if isinstance(name_data, dict) else name_data
+            if isinstance(full_name, str) and len(str(pos)) <= 3: 
+                players.append({'name': full_name, 'pos': pos})
+        
+        for v in obj.values():
+            players.extend(find_players_in_json(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            players.extend(find_players_in_json(item))
+    return players
+
+# --- SCRAPERS ---
+def get_league_matches(league_id):
+    url = f"https://www.fotmob.com/api/leagues?id={league_id}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    try:
+        data = requests.get(url, headers=headers, timeout=10).json()
+        today = datetime.now().strftime('%Y-%m-%d')
+        matches, seen = [], set()
+        
+        def search_m(o):
+            if isinstance(o, dict):
+                if 'home' in o and 'away' in o and 'id' in o:
+                    m_id = o['id']
+                    time_val = str(o.get('status', {}).get('utcTime', '')) or str(o.get('time', ''))
+                    if today in time_val and m_id not in seen:
+                        h = o['home']['name'] if isinstance(o['home'], dict) else o['home']
+                        a = o['away']['name'] if isinstance(o['away'], dict) else o['away']
+                        matches.append({'id': m_id, 'home': h, 'away': a})
+                        seen.add(m_id)
+                for v in o.values(): search_m(v)
+            elif isinstance(o, list):
+                for i in o: search_m(i)
+        
+        search_m(data)
+        return matches
+    except: return []
+
+def scrape_lineup(match_id):
+    url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    try:
+        logger.info(f"🔍 Analyzing match {match_id}")
+        data = requests.get(url, headers=headers, timeout=10).json()
+        content = data.get('content', {})
+        all_players = find_players_in_json(content.get('lineup', {}))
+        
+        # Deduplicate and validate
+        unique = {p['name']: p for p in all_players}.values()
+        
+        if len(unique) >= 11:
+            logger.info(f"✅ Found {len(unique)} players.")
+            return list(unique)
+            
+        return None
+    except Exception as e:
+        logger.error(f"❌ Scraper error: {e}")
+        return None
+
+# --- TELEGRAM HANDLERS ---
+async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton(f"⚽ {k.upper()}", callback_data=f"list_{v}")] for k, v in LEAGUE_MAP.items()]
+    await u.message.reply_text("🎯 **Football Edge Finder v2.1**\nSelect a league:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    q = u.callback_query
+    await q.answer()
+    
+    if q.data.startswith("list_"):
+        l_id = q.data.split("_")[1]
+        matches = get_league_matches(l_id)
+        if not matches:
+            await q.edit_message_text("📭 No matches found for today.")
+            return
+        await q.edit_message_text("🏟 **Select match:**", parse_mode='Markdown')
+        for m in matches:
+            btn = [[InlineKeyboardButton("📋 Analyze Lineup", callback_data=f"an_{m['id']}")]]
+            await q.message.reply_text(f"⚽ {m['home']} vs {m['away']}", reply_markup=InlineKeyboardMarkup(btn))
+            
+    elif q.data.startswith("an_"):
+        m_id = q.data.split("_")[1]
+        lineup = scrape_lineup(m_id)
+        
+        if not lineup:
+            await q.message.reply_text("⏳ **Lineups not confirmed.**")
+            return
+            
+        update_player_knowledge(lineup)
+        alerts = []
+        
+        for p in lineup:
+            usual = get_usual_position(p['name'])
+            if usual and usual != p['pos']:
+                u_z, c_z = POSITION_GROUPS.get(usual, 'M'), POSITION_GROUPS.get(p['pos'], 'M')
+                if u_z == 'D' and c_z in ['M', 'A']:
+                    alerts.append(f"🔥 **{p['name']}** ({usual}➔{p['pos']})\n   *Bet: Over Shots*")
+                elif u_z in ['A', 'M'] and c_z == 'D':
+                    alerts.append(f"⚠️ **{p['name']}** ({usual}➔{p['pos']})\n   *Bet: Over Fouls*")
+        
+        res = "🚨 **EDGES:**\n\n" + ("\n".join(alerts) if alerts else "✅ No position shifts.")
+        await q.message.reply_text(res, parse_mode='Markdown')
+
+def main():
+    threading.Thread(target=run_health_server, daemon=True).start()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button))
+    logger.info("✅ Bot is active...")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
