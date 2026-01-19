@@ -27,14 +27,12 @@ def health(): return "Bot Active", 200
 
 async def get_player_form(player_id):
     """Fetches stats for last 5 matches with a 24-hour MongoDB cache."""
-    # Check if we have a valid cache entry
     cached_data = cache_collection.find_one({"player_id": player_id})
     if cached_data:
         expiry = cached_data['timestamp'] + timedelta(hours=24)
         if datetime.utcnow() < expiry:
             return cached_data['stats_text']
 
-    # If no cache or expired, fetch from API
     url = f"https://www.fotmob.com/api/playerData?id={player_id}"
     try:
         response = requests.get(url, timeout=10)
@@ -43,7 +41,6 @@ async def get_player_form(player_id):
         
         stats_lines = []
         for m in recent_matches:
-            # Safely extract stats
             s = m.get('stats', {})
             sot = s.get('Shots on target', 0)
             fouls = s.get('Fouls committed', 0)
@@ -51,7 +48,6 @@ async def get_player_form(player_id):
         
         stats_text = "\n".join(stats_lines) if stats_lines else "No recent stat data available."
         
-        # Update Cache
         cache_collection.update_one(
             {"player_id": player_id},
             {"$set": {"stats_text": stats_text, "timestamp": datetime.utcnow()}},
@@ -65,12 +61,10 @@ async def get_player_form(player_id):
 # --- 3. ANALYZE LINEUPS LOGIC ---
 
 async def analyze_lineups(query):
-    # Fotmob API - Today's matches
     url = "https://www.fotmob.com/api/allmatches?timezone=Europe/London"
     matches_data = requests.get(url).json()
     
-    # Target specific leagues (e.g., Premier League id: 47)
-    target_leagues = [47, 42, 87, 54, 55] # PL, La Liga, Ligue 1, Serie A, Bunesliga
+    target_leagues = [47, 42, 87, 54, 55] 
     leagues = [l for l in matches_data.get('leagues', []) if l['id'] in target_leagues]
     
     alerts = []
@@ -82,7 +76,7 @@ async def analyze_lineups(query):
 
     for league in leagues:
         for match in league.get('matches', []):
-            if not match.get('status', {}).get('started'): # Only check matches not yet started
+            if not match.get('status', {}).get('started'):
                 m_id = match['id']
                 try:
                     m_url = f"https://www.fotmob.com/api/matchDetails?matchId={m_id}"
@@ -97,20 +91,17 @@ async def analyze_lineups(query):
                                 p_id = p['id']
                                 current_pos = p.get('positionShort', '??')
                                 
-                                # Check Database for "Usual" position
                                 hist = player_collection.find_one({"name": name})
                                 if hist and 'positions' in hist:
                                     usual_pos = max(hist['positions'], key=hist['positions'].get)
                                     alert_msg = ""
                                     market_tip = ""
 
-                                    # LOGIC: Forward Shift
                                     if (usual_pos in ['CB', 'RB', 'LB'] and current_pos in ['DM', 'CM', 'RM', 'LM', 'RW', 'LW', 'ST']) or \
                                        (usual_pos in ['DM', 'CM'] and current_pos in ['AM', 'ST', 'RW', 'LW']):
                                         alert_msg = f"🚀 *FORWARD SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
                                         market_tip = MARKETS['ATTACKING']
 
-                                    # LOGIC: Defensive Shift
                                     elif (usual_pos in ['ST', 'RW', 'LW', 'AM'] and current_pos in ['CM', 'DM', 'RB', 'LB']) or \
                                          (usual_pos in ['CM', 'RM', 'LM'] and current_pos in ['RB', 'LB', 'CB']):
                                         alert_msg = f"🛡️ *DEFENSIVE SHIFT* ({t_name})\n*{name}* at *{current_pos}* (Usual: {usual_pos})"
@@ -130,7 +121,8 @@ async def analyze_lineups(query):
 # --- 4. BOT HANDLERS & SERVER ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("🔍 Analyze Today's Lineups", callback_query_data='analyze')]]
+    # FIXED: Changed 'callback_query_data' to 'callback_data'
+    kb = [[InlineKeyboardButton("🔍 Analyze Today's Lineups", callback_data='analyze')]]
     await update.message.reply_text("Football IQ Bot Online. Monitoring lineups...", reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
