@@ -11,6 +11,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 # --- 1. SETUP & CONFIG ---
 logging.basicConfig(level=logging.INFO)
 
+# Disguise the bot as a real Chrome browser
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 # MongoDB Setup
 MONGO_URI = os.environ.get("MONGO_URI")
 client = MongoClient(MONGO_URI)
@@ -35,7 +40,11 @@ async def get_player_form(player_id):
 
     url = f"https://www.fotmob.com/api/playerData?id={player_id}"
     try:
-        response = requests.get(url, timeout=10)
+        # Added HEADERS and timeout
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            return "⚠️ Stats currently restricted."
+            
         data = response.json()
         recent_matches = data.get('recentMatches', [])[:5]
         
@@ -62,7 +71,18 @@ async def get_player_form(player_id):
 
 async def analyze_lineups(query):
     url = "https://www.fotmob.com/api/allmatches?timezone=Europe/London"
-    matches_data = requests.get(url).json()
+    
+    try:
+        # Added HEADERS to bypass basic bot protection
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            await query.edit_message_text(f"⚠️ API Error: {response.status_code}. Fotmob may be limiting requests.")
+            return
+        matches_data = response.json()
+    except Exception as e:
+        logging.error(f"Main API Error: {e}")
+        await query.edit_message_text("❌ Connection failed. Please try again in a few moments.")
+        return
     
     target_leagues = [47, 42, 87, 54, 55] 
     leagues = [l for l in matches_data.get('leagues', []) if l['id'] in target_leagues]
@@ -80,7 +100,11 @@ async def analyze_lineups(query):
                 m_id = match['id']
                 try:
                     m_url = f"https://www.fotmob.com/api/matchDetails?matchId={m_id}"
-                    details = requests.get(m_url).json()
+                    # Added HEADERS to match details request
+                    m_res = requests.get(m_url, headers=HEADERS, timeout=10)
+                    if m_res.status_code != 200: continue
+                    
+                    details = m_res.json()
                     lineups = details.get('content', {}).get('lineup', {}).get('lineup', [])
                     
                     for team in lineups:
@@ -110,7 +134,9 @@ async def analyze_lineups(query):
                                     if alert_msg:
                                         form = await get_player_form(p_id)
                                         alerts.append(f"{alert_msg}\n{market_tip}\n*Last 5 Form:*\n{form}")
-                except: continue
+                except Exception as e:
+                    logging.error(f"Error processing match {m_id}: {e}")
+                    continue
 
     if not alerts:
         await query.edit_message_text("✅ No major positional changes found in current lineups.")
@@ -121,7 +147,6 @@ async def analyze_lineups(query):
 # --- 4. BOT HANDLERS & SERVER ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # FIXED: Changed 'callback_query_data' to 'callback_data'
     kb = [[InlineKeyboardButton("🔍 Analyze Today's Lineups", callback_data='analyze')]]
     await update.message.reply_text("Football IQ Bot Online. Monitoring lineups...", reply_markup=InlineKeyboardMarkup(kb))
 
