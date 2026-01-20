@@ -4,7 +4,8 @@ from pymongo import MongoClient
 import os
 import pandas as pd
 
-MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://youruser:yourpass@cluster0.abc.mongodb.net/')  # Replace
+MONGODB_URI = os.getenv mongodb+srv://rlandreth14_db_user:J5r1iKoAXgPjsxVW@pl-lineup-bot.tuw2970.mongodb.net/?appName=pl-lineup-bot
+  # Replace
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'YOUR_TOKEN')  # From BotFather
 
 def detect_oop(match_id):
