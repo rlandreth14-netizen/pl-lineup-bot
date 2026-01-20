@@ -5,7 +5,7 @@ import os
 import pandas as pd
 
 MONGODB_URI = os.getenv('MONGODB_URI')  # Pulled from Render env; no default needed if set in dashboard
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')  # Same for token
+TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')  # Same for token
 
 def detect_oop(match_id):
     client = MongoClient(MONGODB_URI)
