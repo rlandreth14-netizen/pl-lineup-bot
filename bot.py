@@ -147,10 +147,41 @@ async def update_data(update: Update, context: CallbackContext):
 
 
 # ---------- Command: start ----------
+from datetime import datetime, timezone
+
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text(
-        "Welcome! Use /update to fetch FPL players/fixtures/lineups. Use /check <match_id> to detect OOP (or just /check for latest)."
-    )
+    client = MongoClient(MONGODB_URI)
+    db = client['premier_league']
+
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
+
+    fixtures_today = []
+
+    for f in db.fixtures.find():
+        if not f.get('kickoff_time'):
+            continue
+
+        kickoff = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
+        if kickoff.date() == today_utc:
+            fixtures_today.append(f)
+
+    client.close()
+
+    if not fixtures_today:
+        await update.message.reply_text(
+            "📅 No Premier League matches today.\n\n"
+            "Use /update to refresh data or check back later."
+        )
+        return
+
+    lines = ["⚽ *Premier League matches today:*"]
+    for f in fixtures_today:
+        kickoff = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
+        time_str = kickoff.strftime("%H:%M UTC")
+        lines.append(f"• Match ID {f['id']} — Kickoff {time_str}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ---------- Command: check (auto-find latest if no arg) ----------
