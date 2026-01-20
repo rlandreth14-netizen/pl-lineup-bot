@@ -4,9 +4,8 @@ from pymongo import MongoClient
 import os
 import pandas as pd
 
-MONGODB_URI = os.getenv mongodb+srv://rlandreth14_db_user:J5r1iKoAXgPjsxVW@pl-lineup-bot.tuw2970.mongodb.net/?appName=pl-lineup-bot
-  # Replace
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'YOUR_TOKEN')  # From BotFather
+MONGODB_URI = os.getenv('MONGODB_URI')  # Pulled from Render env; no default needed if set in dashboard
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')  # Same for token
 
 def detect_oop(match_id):
     client = MongoClient(MONGODB_URI)
