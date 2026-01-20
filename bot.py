@@ -24,10 +24,13 @@ def get_db():
     return client, db
 
 # --- HISTORICAL STORAGE HELPER ---
-def save_gameweek_stats(gameweek, players_df):
+def save_gameweek_stats(gameweek, players_df, fixtures_df, lineups):
     os.makedirs("historical_stats", exist_ok=True)
     file_path = f"historical_stats/gameweek_{gameweek}.csv"
+    # Combine players + lineups into one CSV (simplified)
     players_df.to_csv(file_path, index=False)
+    # Could also save fixtures or lineups in JSON for more detail
+    logging.info(f"Saved historical stats to {file_path}")
 
 # --- DETECT ABNORMAL PLAYER PERFORMANCE ---
 def detect_abnormal(match_id):
@@ -96,13 +99,25 @@ async def update_data(update: Update, context: CallbackContext):
         'selected_by_percent'
     ]].to_dict('records')
 
+    # --- TEAM MAPPING ---
+    teams_df = pd.DataFrame(bootstrap['teams'])
+    team_map = dict(zip(teams_df['id'], teams_df['name']))
+
     # --- FIXTURES ---
     fixtures = requests.get(base_url + "fixtures/").json()
-    fixtures_df = pd.DataFrame(fixtures)
-    fixtures_dict = fixtures_df[[
-        'id', 'event', 'team_h', 'team_a',
-        'kickoff_time', 'started', 'finished'
-    ]].to_dict('records')
+    fixtures_dict = []
+    for f in fixtures:
+        fixtures_dict.append({
+            'id': f['id'],
+            'event': f['event'],
+            'team_h': f['team_h'],
+            'team_a': f['team_a'],
+            'team_h_name': team_map.get(f['team_h'], str(f['team_h'])),
+            'team_a_name': team_map.get(f['team_a'], str(f['team_a'])),
+            'kickoff_time': f['kickoff_time'],
+            'started': f['started'],
+            'finished': f['finished']
+        })
 
     # --- LINEUPS ---
     lineup_entries = []
@@ -117,6 +132,7 @@ async def update_data(update: Update, context: CallbackContext):
                             "minutes": p['value']
                         })
 
+    # --- SAVE TO MONGO ---
     client, db = get_db()
     db.players.delete_many({})
     db.players.insert_many(players_dict)
@@ -125,13 +141,29 @@ async def update_data(update: Update, context: CallbackContext):
     db.lineups.delete_many({})
     if lineup_entries:
         db.lineups.insert_many(lineup_entries)
+
+    # --- Save historical stats for learning ---
+    current_gw = bootstrap['events'][0]['id']  # Current gameweek
+    season_name = f"season_{datetime.now().year}_{datetime.now().year+1}"  # Example: 2025_26
+    hist_col = db[f"historical_stats_{season_name}"]
+    hist_col.replace_one(
+        {'game_week': current_gw},
+        {
+            'game_week': current_gw,
+            'timestamp': datetime.now(timezone.utc),
+            'players': players_dict,
+            'fixtures': fixtures_dict,
+            'lineups': lineup_entries
+        },
+        upsert=True
+    )
+
     client.close()
 
-    # --- Save historical stats for current GW ---
-    gameweek = bootstrap['events'][0]['id']  # Approx, can improve later
-    save_gameweek_stats(gameweek, players)
+    # --- Save to local CSV too ---
+    save_gameweek_stats(current_gw, players, pd.DataFrame(fixtures_dict), lineup_entries)
 
-    await update.message.reply_text("✅ Update complete.")
+    await update.message.reply_text("✅ Update complete and historical stats saved.")
 
 # --- START COMMAND ---
 async def start(update: Update, context: CallbackContext):
@@ -153,7 +185,7 @@ async def start(update: Update, context: CallbackContext):
 
     msg = ["⚽ Matches today:"]
     for ko, f in todays:
-        msg.append(f"• {f['team_h']} vs {f['team_a']} — {ko.strftime('%H:%M UTC')}")
+        msg.append(f"• {f['team_h_name']} vs {f['team_a_name']} — {ko.strftime('%H:%M UTC')}")
     await update.message.reply_text("\n".join(msg))
 
 # --- CALLBACKS ---
@@ -167,10 +199,9 @@ async def handle_callbacks(update: Update, context: CallbackContext):
         fixtures = get_next_fixtures(db)
         lines = ["📆 Upcoming fixtures:"]
         for ko, f in fixtures:
-            lines.append(f"• {f['team_h']} vs {f['team_a']} — {ko.strftime('%d %b %H:%M UTC')}")
+            lines.append(f"• {f['team_h_name']} vs {f['team_a_name']} — {ko.strftime('%d %b %H:%M UTC')}")
         await query.edit_message_text("\n".join(lines))
 
-    # --- Selected fixture: show player stats + insights ---
     elif query.data.startswith("fixture_"):
         match_id = int(query.data.split("_")[1])
         fixture = db.fixtures.find_one({'id': match_id})
@@ -179,10 +210,11 @@ async def handle_callbacks(update: Update, context: CallbackContext):
         else:
             abnormal = detect_abnormal(match_id)
             benched = detect_high_ownership_benched(match_id)
-            msg = f"⚽ {fixture['team_h']} vs {fixture['team_a']}\n\n{abnormal}"
+            msg = f"⚽ {fixture['team_h_name']} vs {fixture['team_a_name']}\n\n{abnormal}"
             if benched:
                 msg += f"\n\n{benched}"
             await query.edit_message_text(msg)
+
     client.close()
 
 # --- CHECK COMMAND ---
@@ -216,4 +248,4 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
-    app.run_polling()  # <-- blocks here to keep bot alive
+    app.run_polling()
