@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from flask import Flask
 import threading
+import requests
 
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
@@ -39,6 +40,38 @@ def detect_oop(match_id):
     client.close()
     return "\n".join(insights)
 
+async def update_data(update: Update, context: CallbackContext):
+    await update.message.reply_text("Pulling latest FPL data... this might take 30-60 seconds.")
+    
+    base_url = "https://fantasy.premierleague.com/api/"
+    try:
+        bootstrap = requests.get(base_url + "bootstrap-static/").json()
+        fixtures = requests.get(base_url + "fixtures/").json()
+        
+        players = pd.DataFrame(bootstrap['elements'])
+        players = players[['id', 'web_name', 'element_type', 'minutes', 'goals_scored', 'assists', 'yellow_cards', 'total_points']]
+        pos_map = {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'}
+        players['position'] = players['element_type'].map(pos_map)
+        players_dict = players.to_dict('records')
+        
+        fixtures_df = pd.DataFrame(fixtures)
+        fixtures_df = fixtures_df[['id', 'event', 'team_h', 'team_a', 'kickoff_time']]
+        fixtures_dict = fixtures_df.to_dict('records')
+        
+        client = MongoClient(MONGODB_URI)
+        db = client['premier_league']
+        
+        db.players.delete_many({})
+        db.players.insert_many(players_dict)
+        db.fixtures.delete_many({})
+        db.fixtures.insert_many(fixtures_dict)
+        
+        client.close()
+        
+        await update.message.reply_text("FPL data updated! Players and fixtures pulled successfully. Now add lineups manually for testing.")
+    except Exception as e:
+        await update.message.reply_text(f"Error pulling data: {str(e)}")
+
 async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("Welcome, Ryan! Use /check <match_id> for OOP insights (e.g., /check 1). Ensure lineups are added to DB.")
 
@@ -66,7 +99,8 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     
     # Run Telegram bot polling
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("update", update_data))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
     app.run_polling()
