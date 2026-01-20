@@ -9,12 +9,14 @@ from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 
+# Import your pre-match module
+from pre_match_lineup import process_prematch_lineup
+
 logging.basicConfig(level=logging.INFO)
 
 # --- ENV VARIABLES ---
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
-
 HIGH_OWNERSHIP_THRESHOLD = 20.0  # %
 
 # --- MONGO HELPER ---
@@ -23,7 +25,7 @@ def get_db():
     db = client['premier_league']
     return client, db
 
-# --- TEAM NAME HELPER (NEW) ---
+# --- TEAM NAME HELPER ---
 def get_team_name(db, team_id):
     team = db.teams.find_one({'_id': team_id})
     return team['name'] if team else str(team_id)
@@ -121,7 +123,7 @@ async def update_data(update: Update, context: CallbackContext):
         'selected_by_percent'
     ]].to_dict('records')
 
-    # --- TEAMS (NEW & IMPORTANT) ---
+    # --- TEAMS ---
     teams_df = pd.DataFrame(bootstrap['teams'])
     teams_dict = teams_df[['id', 'name', 'short_name']] \
         .rename(columns={'id': '_id', 'short_name': 'short'}) \
@@ -153,24 +155,20 @@ async def update_data(update: Update, context: CallbackContext):
                         })
 
     client, db = get_db()
-
     db.players.delete_many({})
     db.players.insert_many(players_dict)
-
     db.teams.delete_many({})
     db.teams.insert_many(teams_dict)
-
     db.fixtures.delete_many({})
     db.fixtures.insert_many(fixtures_dict)
-
     db.lineups.delete_many({})
     if lineup_entries:
         db.lineups.insert_many(lineup_entries)
 
     current_gw = bootstrap['events'][0]['id']
     save_gameweek_stats(current_gw, players)
-
     client.close()
+
     await update.message.reply_text("✅ Update complete.")
 
 # --- START COMMAND ---
@@ -196,9 +194,32 @@ async def start(update: Update, context: CallbackContext):
         home = get_team_name(db, f['team_h'])
         away = get_team_name(db, f['team_a'])
         msg.append(f"• {home} vs {away} — {ko.strftime('%H:%M UTC')}")
-
     client.close()
     await update.message.reply_text("\n".join(msg))
+
+# --- PRE-MATCH LINEUP COMMAND ---
+async def prematch_lineup(update: Update, context: CallbackContext):
+    """
+    Example usage: /prematch_lineup <match_id> <team_name> <image_url>
+    """
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /prematch_lineup <match_id> <team_name> <image_url>"
+        )
+        return
+
+    match_id = int(context.args[0])
+    team_name = context.args[1]
+    image_url = context.args[2]
+
+    result = process_prematch_lineup(match_id, team_name, image_url)
+    if result:
+        players_text = "\n".join([f"{p['name']} ({p['confidence']}%)" for p in result['players']])
+        await update.message.reply_text(
+            f"📋 Pre-match lineup for {team_name}:\n\n{players_text}"
+        )
+    else:
+        await update.message.reply_text("⚠️ Could not process lineup.")
 
 # --- CALLBACKS ---
 async def handle_callbacks(update: Update, context: CallbackContext):
@@ -217,7 +238,7 @@ async def handle_callbacks(update: Update, context: CallbackContext):
 
     client.close()
 
-# --- DEBUG COMMANDS (NEW) ---
+# --- DEBUG COMMANDS ---
 async def debug_teams(update: Update, context: CallbackContext):
     client, db = get_db()
     teams = list(db.teams.find().limit(20))
@@ -250,5 +271,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("debug_teams", debug_teams))
     app.add_handler(CommandHandler("debug_fixtures", debug_fixtures))
+    app.add_handler(CommandHandler("prematch_lineup", prematch_lineup))  # <-- New
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     app.run_polling()
