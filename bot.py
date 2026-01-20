@@ -99,7 +99,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     
     # Run Telegram bot polling
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("update", update_data))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
