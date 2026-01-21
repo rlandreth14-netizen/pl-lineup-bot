@@ -314,4 +314,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     
     if __name__ == "__main__":
+    # Starts the bot in polling mode
+    # This is the proper way without asyncio.run() for telegram.ext.Application
     app.run_polling()
