@@ -30,9 +30,7 @@ def get_db():
     return client, db
 
 # --- CORE FUNCTIONS ---
-
 def fetch_sofascore_lineup(match_id):
-    """Pulls the tactical lineup from SofaScore."""
     url = f"https://api.sofascore.com/api/v1/event/{match_id}/lineups"
     try:
         res = requests.get(url, headers=SOFASCORE_HEADERS)
@@ -49,7 +47,7 @@ def fetch_sofascore_lineup(match_id):
                 players.append({
                     "name": p.get('name', 'Unknown'),
                     "sofa_id": p.get('id'),
-                    "tactical_pos": entry.get('position', 'Unknown'),  # e.g., D, M, F, LB, CAM
+                    "tactical_pos": entry.get('position', 'Unknown'),
                     "team": team_name
                 })
         return players
@@ -77,7 +75,6 @@ def detect_high_ownership_benched(match_id, db):
     return "\n".join(alerts) if alerts else None
 
 def detect_tactical_oop(db, match_id_filter=None):
-    """Detects tactical OOP based on SofaScore lineup vs FPL position."""
     query = {}
     if match_id_filter:
         query = {"match_id": match_id_filter}
@@ -86,7 +83,6 @@ def detect_tactical_oop(db, match_id_filter=None):
     if not latest: return None
     
     insights = []
-    # Map FPL positions to general tactical role for better comparison
     fpl_map = {'GK': 'GK', 'DEF': 'DEF', 'MID': 'MID', 'FWD': 'FWD'}
     
     for p_sofa in latest['players']:
@@ -97,7 +93,6 @@ def detect_tactical_oop(db, match_id_filter=None):
             if not fpl_pos: continue
             
             is_oop = False
-            # Detect general OOP (position change across lines)
             if fpl_pos == 'DEF' and sofa_pos not in ['DEF', 'GK']: is_oop = True
             elif fpl_pos == 'MID' and sofa_pos in ['FWD']: is_oop = True
             elif fpl_pos == 'FWD' and sofa_pos in ['MID', 'DEF']: is_oop = True
@@ -123,7 +118,7 @@ def get_next_fixtures(db, limit=5):
 def run_monitor():
     while True:
         try:
-            time.sleep(60)  # every minute
+            time.sleep(60)
             client, db = get_db()
             now = datetime.now(timezone.utc)
             upcoming = db.fixtures.find({
@@ -138,7 +133,6 @@ def run_monitor():
                 if 55 <= diff_mins <= 65:
                     logging.info(f"Auto-checking match: {f['team_h_name']} vs {f['team_a_name']}")
                     
-                    # SofaScore lineup
                     sofa_events = get_today_sofascore_matches()
                     target_event = next((e for e in sofa_events if e.get('homeTeam', {}).get('name') == f['team_h_name'] 
                                          or e.get('awayTeam', {}).get('name') == f['team_a_name']), None)
@@ -157,7 +151,6 @@ def run_monitor():
                             oop = detect_tactical_oop(db, target_event['id'])
                             if oop: msg_parts.append(f"\n*Tactical Shifts:*\n{oop}")
                     
-                    # High ownership bench
                     benched = detect_high_ownership_benched(f['id'], db)
                     if benched: msg_parts.append(f"\n*Benched Assets:*\n{benched}")
                     
@@ -178,7 +171,6 @@ def run_monitor():
             logging.error(f"Monitor Loop Error: {e}")
 
 # --- TELEGRAM COMMANDS ---
-
 async def start(update: Update, context: CallbackContext):
     client, db = get_db()
     user_id = update.effective_chat.id
@@ -304,16 +296,18 @@ def run_flask():
 
 # --- MAIN ---
 if __name__ == "__main__":
+    # Start Flask status server
     threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Start background monitor
     threading.Thread(target=run_monitor, daemon=True).start()
     
+    # Build and start Telegram bot
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("update", update_data))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     
-    if __name__ == "__main__":
-    # Starts the bot in polling mode
-    # This is the proper way without asyncio.run() for telegram.ext.Application
+    # Run polling loop
     app.run_polling()
