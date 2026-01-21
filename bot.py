@@ -4,7 +4,7 @@ import threading
 import logging
 import requests
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from flask import Flask
 from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -97,7 +97,19 @@ def detect_tactical_oop(db, match_id_filter=None):
     
     return "\n".join(insights) if insights else None
 
-# --- BACKGROUND MONITOR (THE NEW FEATURE) ---
+def get_next_fixtures(db, limit=5):
+    """Restored: Finds the next upcoming games."""
+    now = datetime.now(timezone.utc)
+    upcoming = []
+    for f in db.fixtures.find({'started': False, 'finished': False}):
+        if not f.get('kickoff_time'): continue
+        ko = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
+        if ko > now:
+            upcoming.append((ko, f))
+    upcoming.sort(key=lambda x: x[0])
+    return upcoming[:limit]
+
+# --- BACKGROUND MONITOR ---
 def run_monitor():
     """Checks every minute for games starting in ~60 mins."""
     while True:
@@ -140,9 +152,7 @@ def run_monitor():
                             oop = detect_tactical_oop(db, target_event['id'])
                             if oop: msg_parts.append(f"\n*Tactical Shifts:*\n{oop}")
                     
-                    # 2. Check FPL Bench (if data exists)
-                    # Note: We rely on /update being run previously or real-time FPL fetch here if needed. 
-                    # For simplicity, we assume FPL lineup data might lag, but we check what we have.
+                    # 2. Check FPL Bench
                     benched = detect_high_ownership_benched(f['id'], db)
                     if benched: msg_parts.append(f"\n*Benched Assets:*\n{benched}")
                     
@@ -273,8 +283,20 @@ async def check(update: Update, context: CallbackContext):
 async def handle_callbacks(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+    client, db = get_db()
+    
     if query.data == "next_fixtures":
-        await query.edit_message_text("Check FPL app for full schedule.")
+        fixtures = get_next_fixtures(db)
+        if not fixtures:
+            await query.edit_message_text("No upcoming fixtures found.")
+        else:
+            lines = ["📆 *Upcoming Fixtures:*"]
+            for ko, f in fixtures:
+                date_str = ko.strftime('%d %b %H:%M')
+                lines.append(f"• {f['team_h_name']} vs {f['team_a_name']} ({date_str})")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            
+    client.close()
 
 # --- FLASK & MAIN ---
 flask_app = Flask(__name__)
