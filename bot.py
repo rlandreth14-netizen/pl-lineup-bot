@@ -313,5 +313,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     
-    import asyncio
-    asyncio.run(app.run_polling())
+    if __name__ == "__main__":
+    app.run_polling()
