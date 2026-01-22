@@ -1,3 +1,6 @@
+Yes that sounds good. Can you rewrite it WITHOUT changing any thing else, it is working well! 
+This is the code: 
+
 import os
 import time
 import threading
@@ -118,131 +121,144 @@ def get_next_fixtures(db, limit=5):
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:limit]
 
-# --- HELPER FUNCTIONS FOR BET BUILDER & ACCUMULATOR ---
+# --- FIXTURE BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture):
-    """Simple xG-based result prediction"""
     try:
         home_xg = fixture.get('home_xg', 1.2)
         away_xg = fixture.get('away_xg', 1.0)
-        if home_xg - away_xg > 0.5:
-            return f"{fixture['team_h_name']} to Win"
-        elif away_xg - home_xg > 0.5:
-            return f"{fixture['team_a_name']} to Win"
+        home_team = fixture['team_h_name']
+        away_team = fixture['team_a_name']
+
+        if home_xg - away_xg >= 0.5:
+            return f"{home_team} to Win"
+        elif away_xg - home_xg >= 0.5:
+            return f"{away_team} to Win"
         else:
             return "Draw / Skip"
-    except Exception as e:
-        logging.error(f"evaluate_team_result error: {e}")
-        return "Unknown"
+    except:
+        return "Draw / Skip"
 
 def evaluate_btts(fixture):
-    """Basic BTTS evaluation based on xG"""
     try:
         home_xg = fixture.get('home_xg', 1.2)
-        away_xg = fixture.get('away_xg', 1.0)
-        if home_xg > 1.0 and away_xg > 1.0:
+        away_xg = fixture.get('away_xg', 1.2)
+        if home_xg >= 1.2 and away_xg >= 1.2:
             return "Yes"
-        return "No"
-    except Exception as e:
-        logging.error(f"evaluate_btts error: {e}")
-        return "Unknown"
+        elif home_xg < 1.0 or away_xg < 1.0:
+            return "No"
+        else:
+            return "Skip"
+    except:
+        return "Skip"
 
-def get_team_form(team_id, db, last_n=5):
-    """Fetch last N results as form (0=loss, 1=draw, 3=win), returns avg normalized 0-1"""
+def select_shot_player(team_name, lineup, db):
     try:
-        fixtures = list(db.fixtures.find({'started': True, '$or':[{'team_h': team_id},{'team_a': team_id}]}).sort('kickoff_time', -1))
-        fixtures = fixtures[:last_n]
-        if not fixtures: return 0
-        total = 0
-        for f in fixtures:
-            if f['team_h'] == team_id:
-                if f['team_h_score'] > f['team_a_score']: total += 3
-                elif f['team_h_score'] == f['team_a_score']: total += 1
-            else:
-                if f['team_a_score'] > f['team_h_score']: total += 3
-                elif f['team_a_score'] == f['team_h_score']: total += 1
-        return total / (3*last_n)
-    except Exception as e:
-        logging.error(f"get_team_form error: {e}")
-        return 0
+        candidates = []
+        for p in lineup:
+            if p['team'] != team_name: continue
+            fpl_p = db.players.find_one({"web_name": {"$regex": f"^{p['name']}$", "$options": "i"}})
+            if not fpl_p: continue
+            sofa_pos = p.get('tactical_pos', '')
+            fpl_pos = fpl_p.get('position', '')
+            if fpl_p.get('minutes',0) == 0: continue
+            if fpl_pos not in ['FWD', 'MID']: continue
+            if sofa_pos in ['FWD', 'MID']:
+                candidates.append(p['name'])
+        return candidates[0] if candidates else None
+    except:
+        return None
 
-# --- FIXTURE BET BUILDER FUNCTIONS (UPGRADED) ---
 def generate_fixture_bet_builder(fixture, db):
-    """
-    Enhanced bet builder:
-    - Includes result prediction based on xG
-    - BTTS based on xG
-    - Suggests top 2 attackers per team based on minutes and position
-    - Includes players likely to assist based on FPL stats
-    """
     try:
         builder = []
-
-        # --- Result & BTTS ---
         result = evaluate_team_result(fixture)
         builder.append(f"• Result: {result}")
         btts = evaluate_btts(fixture)
         builder.append(f"• BTTS: {btts}")
 
-        # --- Tactical data ---
         sofa_data = db.tactical_data.find_one({"match_id": fixture.get('sofascore_id')})
-        if not sofa_data:
-            return "\n".join(builder)
+        if not sofa_data: return "\n".join(builder)
 
-        # --- Player suggestions ---
-        def top_attackers(team_name):
-            candidates = []
-            for p in sofa_data.get('players', []):
-                if p['team'] != team_name:
-                    continue
-                fpl_p = db.players.find_one({"web_name": {"$regex": f"^{p['name']}$", "$options": "i"}})
-                if not fpl_p or fpl_p.get('minutes', 0) == 0:
-                    continue
-                sofa_pos = p.get('tactical_pos', '')
-                fpl_pos = fpl_p.get('position', '')
-                if fpl_pos in ['FWD', 'MID'] and sofa_pos in ['FWD', 'MID']:
-                    candidates.append((p['name'], fpl_p.get('total_points', 0)))
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            return [c[0] for c in candidates[:2]]
+        home_player = select_shot_player(fixture['team_h_name'], sofa_data.get('players', []), db)
+        away_player = select_shot_player(fixture['team_a_name'], sofa_data.get('players', []), db)
 
-        for team in [fixture['team_h_name'], fixture['team_a_name']]:
-            attackers = top_attackers(team)
-            for atk in attackers:
-                builder.append(f"• {atk} 1+ SOT")
-
+        if home_player: builder.append(f"• {home_player} 1+ SOT")
+        if away_player: builder.append(f"• {away_player} 1+ SOT")
         return "\n".join(builder)
     except Exception as e:
-        logging.error(f"Enhanced Bet Builder Error: {e}")
+        logging.error(f"Bet Builder Error: {e}")
         return "Could not generate builder."
 
-# --- GAMEWEEK ACCUMULATOR (UPGRADED) ---
+# --- GAMEWEEK ACCUMULATOR ---
+def get_team_form(team_id, db, last_n=5):
+    """Calculate form points from last_n matches for a team."""
+    try:
+        results = list(db.fixtures.find({
+            '$or': [{'team_h': team_id}, {'team_a': team_id}],
+            'finished': True
+        }).sort('kickoff_time', -1).limit(last_n))
+        points = 0
+        for f in results:
+            h_score = f.get('team_h_score')
+            a_score = f.get('team_a_score')
+            if h_score is None or a_score is None:
+                continue
+            if f['team_h'] == team_id:
+                if h_score > a_score: points += 3
+                elif h_score == a_score: points += 1
+            else:
+                if a_score > h_score: points += 3
+                elif a_score == h_score: points += 1
+        return points
+    except Exception as e:
+        logging.error(f"Team form error: {e}")
+        return 0
+
+def get_h2h_edge(home_id, away_id, db, last_n=3):
+    """Return H2H edge for home team based on last_n matches."""
+    try:
+        h2h_games = list(db.fixtures.find({
+            '$or': [
+                {'team_h': home_id, 'team_a': away_id},
+                {'team_h': away_id, 'team_a': home_id}
+            ],
+            'finished': True
+        }).sort('kickoff_time', -1).limit(last_n))
+        edge = 0
+        for f in h2h_games:
+            h_score = f.get('team_h_score')
+            a_score = f.get('team_a_score')
+            if h_score is None or a_score is None:
+                continue
+            if f['team_h'] == home_id and h_score > a_score:
+                edge += 0.5
+            elif f['team_a'] == home_id and a_score > h_score:
+                edge += 0.5
+            elif h_score == a_score:
+                edge += 0.0
+            else:
+                edge -= 0.5
+        return edge
+    except Exception as e:
+        logging.error(f"H2H edge error: {e}")
+        return 0
+
 def generate_gw_accumulator(db, top_n=5):
-    """
-    Faster accumulator with multiple improvements:
-    - Considers xG, form, table difference, H2H
-    - Uses pre-fetched stats to avoid repeated DB lookups
-    - Returns top N strongest bets
-    """
+    """Generate strongest win/draw/lose bets for the week."""
     try:
         upcoming = list(db.fixtures.find({'started': False, 'finished': False}))
         accumulator = []
 
-        # --- Pre-fetch all teams' form ---
-        team_ids = set([f['team_h'] for f in upcoming] + [f['team_a'] for f in upcoming])
-        team_form_cache = {tid: get_team_form(tid, db) for tid in team_ids}
-
         for f in upcoming:
             try:
-                home_id = f['team_h']
-                away_id = f['team_a']
-
                 home_xg = f.get('home_xg', 1.2)
                 away_xg = f.get('away_xg', 1.0)
-
-                home_form = team_form_cache.get(home_id, 0)
-                away_form = team_form_cache.get(away_id, 0)
-
+                home_id = f['team_h']
+                away_id = f['team_a']
+                home_form = get_team_form(home_id, db)
+                away_form = get_team_form(away_id, db)
                 table_diff = f.get('away_table_pos', 10) - f.get('home_table_pos', 10)
-                h2h = 0  # Placeholder: implement get_h2h_edge if desired
+                h2h = get_h2h_edge(home_id, away_id, db)
 
                 final_strength = (home_xg - away_xg) + 0.1*(home_form - away_form) + 0.05*table_diff + h2h
 
@@ -258,12 +274,12 @@ def generate_gw_accumulator(db, top_n=5):
             except Exception as e:
                 logging.error(f"GW Accumulator Error for {f.get('team_h_name')} vs {f.get('team_a_name')}: {e}")
 
+        # Sort strongest bets first
         accumulator.sort(reverse=True, key=lambda x: x[0])
         top_bets = [x[1] for x in accumulator[:top_n]]
         return "\n".join(top_bets) if top_bets else "No strong bets found."
-
     except Exception as e:
-        logging.error(f"Enhanced GW Accumulator Error: {e}")
+        logging.error(f"Generate accumulator error: {e}")
         return "Error generating accumulator."
 
 # --- FIXTURE MENU SYSTEM ---
@@ -302,6 +318,7 @@ def run_monitor():
                                           "last_updated": datetime.now(timezone.utc)}},
                                 upsert=True
                             )
+                            # Store sofascore_id in fixture for bet builder
                             db.fixtures.update_one({'id': f['id']}, {'$set': {'sofascore_id': target_event['id']}})
                             oop = detect_tactical_oop(db, target_event['id'])
                             if oop: msg_parts.append(f"\n*Tactical Shifts:*\n{oop}")
@@ -348,6 +365,7 @@ async def update_data(update: Update, context: CallbackContext):
         base_url = "https://fantasy.premierleague.com/api/"
         bootstrap = requests.get(base_url + "bootstrap-static/", timeout=30).json()
         
+        # Players - FIXED: Added 'team' field
         players = pd.DataFrame(bootstrap['elements'])
         pos_map = {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'}
         players['position'] = players['element_type'].map(pos_map)
@@ -355,6 +373,7 @@ async def update_data(update: Update, context: CallbackContext):
         db.players.delete_many({})
         db.players.insert_many(players_dict)
         
+        # Fixtures
         fixtures = requests.get(base_url + "fixtures/", timeout=30).json()
         teams_df = pd.DataFrame(bootstrap['teams'])
         team_map = dict(zip(teams_df['id'], teams_df['name']))
@@ -371,6 +390,7 @@ async def update_data(update: Update, context: CallbackContext):
         db.fixtures.delete_many({})
         db.fixtures.insert_many(fixtures_dict)
         
+        # Lineups
         lineup_entries = []
         for f in fixtures:
             for s in f.get('stats', []):
@@ -381,6 +401,7 @@ async def update_data(update: Update, context: CallbackContext):
         db.lineups.delete_many({})
         if lineup_entries: db.lineups.insert_many(lineup_entries)
         
+        # SofaScore sync
         today_events = get_today_sofascore_matches()
         for event in today_events:
             sofa_lineup = fetch_sofascore_lineup(event['id'])
@@ -420,6 +441,7 @@ async def builder(update: Update, context: CallbackContext):
     client.close()
 
 async def gw_accumulator(update: Update, context: CallbackContext):
+    """FIXED: Moved outside generate_gw_accumulator function"""
     client, db = get_db()
     msg = "📊 *Gameweek Accumulator:*\n\n"
     msg += generate_gw_accumulator(db)
@@ -477,6 +499,7 @@ if __name__ == "__main__":
     if not MONGODB_URI or not TELEGRAM_TOKEN:
         raise ValueError("MONGODB_URI and BOT_TOKEN environment variables required")
     
+    # Start Telegram Bot
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("update", update_data))
@@ -486,10 +509,13 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("gw_accumulator", gw_accumulator))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     
+    # Start monitor in background
     monitor_thread = threading.Thread(target=run_monitor, daemon=True)
     monitor_thread.start()
 
+    # Start Flask app for ping
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))), daemon=True).start()
 
+    # Run Telegram bot
     logging.info("Starting PL Lineup Bot...")
     application.run_polling()
