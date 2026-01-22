@@ -186,6 +186,14 @@ def generate_fixture_bet_builder(fixture, db):
         logging.error(f"Bet Builder Error: {e}")
         return "Could not generate builder."
 
+# --- FIXTURE MENU SYSTEM ---
+def show_fixture_menu(db):
+    fixtures = get_next_fixtures(db, limit=10)
+    keyboard = []
+    for _, f in fixtures:
+        keyboard.append([InlineKeyboardButton(f"{f['team_h_name']} vs {f['team_a_name']}", callback_data=f"select_{f['id']}")])
+    return keyboard if keyboard else [[InlineKeyboardButton("No upcoming fixtures", callback_data="none")]]
+
 # --- BACKGROUND MONITOR ---
 def run_monitor():
     while True:
@@ -247,129 +255,26 @@ async def start(update: Update, context: CallbackContext):
         "/status - Check bot status and last update info\n\n"
         "Tip: Use the 📆 Next fixtures button below to see upcoming matches."
     )
-    today = datetime.now(timezone.utc).date()
-    todays = []
-    for f in db.fixtures.find():
-        ko_time = f.get('kickoff_time')
-        if not ko_time: continue
-        ko = datetime.fromisoformat(ko_time.replace('Z','+00:00'))
-        if ko.date() == today:
-            todays.append((ko, f))
-    if todays:
-        welcome_msg += "\n\n⚽ Matches today:\n"
-        for ko, f in todays:
-            welcome_msg += f"• {f['team_h_name']} vs {f['team_a_name']} — {ko.strftime('%H:%M UTC')}\n"
-    else:
-        welcome_msg += "\n\nNo games today. You are registered for lineup alerts!"
-    keyboard = [[InlineKeyboardButton("📆 Next fixtures", callback_data="next_fixtures")]]
+    keyboard = show_fixture_menu(db)
     await update.message.reply_text(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))
     client.close()
-
-async def update_data(update: Update, context: CallbackContext):
-    await update.message.reply_text("🔄 Syncing FPL & SofaScore Data...")
-    client, db = get_db()
-    try:
-        base_url = "https://fantasy.premierleague.com/api/"
-        bootstrap = requests.get(base_url + "bootstrap-static/").json()
-        players = pd.DataFrame(bootstrap['elements'])
-        pos_map = {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'}
-        players['position'] = players['element_type'].map(pos_map)
-        players_dict = players[['id','web_name','position','minutes','goals_scored','assists','total_points','selected_by_percent']].to_dict('records')
-        db.players.delete_many({})
-        db.players.insert_many(players_dict)
-        fixtures = requests.get(base_url + "fixtures/").json()
-        teams_df = pd.DataFrame(bootstrap['teams'])
-        team_map = dict(zip(teams_df['id'], teams_df['name']))
-        fixtures_dict = []
-        for f in fixtures:
-            fixtures_dict.append({
-                'id': f['id'], 'event': f['event'], 'team_h': f['team_h'], 'team_a': f['team_a'],
-                'team_h_name': team_map.get(f['team_h'], str(f['team_h'])),
-                'team_a_name': team_map.get(f['team_a'], str(f['team_a'])),
-                'kickoff_time': f['kickoff_time'], 'started': f['started'], 'finished': f['finished']
-            })
-        db.fixtures.delete_many({})
-        db.fixtures.insert_many(fixtures_dict)
-        lineup_entries = []
-        for f in fixtures:
-            for s in f.get('stats', []):
-                if s.get('identifier') == 'minutes':
-                    for side in ('h','a'):
-                        for p in s.get(side, []):
-                            lineup_entries.append({"match_id": f['id'], "player_id": p['element'], "minutes": p['value']})
-        db.lineups.delete_many({})
-        if lineup_entries: db.lineups.insert_many(lineup_entries)
-        today_events = get_today_sofascore_matches()
-        for event in today_events:
-            sofa_lineup = fetch_sofascore_lineup(event['id'])
-            if sofa_lineup:
-                db.tactical_data.update_one(
-                    {"match_id": event['id']},
-                    {"$set": {"home_team": event['homeTeam']['name'],
-                              "away_team": event['awayTeam']['name'],
-                              "players": sofa_lineup,
-                              "last_updated": datetime.now(timezone.utc)}},
-                    upsert=True
-                )
-        await update.message.reply_text("✅ Sync Complete.")
-    except Exception as e:
-        logging.error(f"/update error: {e}")
-        await update.message.reply_text("⚠️ Failed to sync data.")
-    finally:
-        client.close()
-
-async def check(update: Update, context: CallbackContext):
-    client, db = get_db()
-    latest_tactical = db.tactical_data.find_one(sort=[("last_updated", -1)])
-    if not latest_tactical:
-        client.close()
-        await update.message.reply_text("No tactical data found. Run /update.")
-        return
-    msg = f"📊 *Analysis: {latest_tactical['home_team']} vs {latest_tactical['away_team']}*\n"
-    oop = detect_tactical_oop(db, latest_tactical['match_id'])
-    msg += oop if oop else "✅ No tactical OOP shifts."
-    client.close()
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def builder(update: Update, context: CallbackContext):
-    client, db = get_db()
-    fixture = db.fixtures.find_one(sort=[("kickoff_time", 1)])
-    if not fixture:
-        client.close()
-        await update.message.reply_text("No upcoming fixtures found.")
-        return
-    builder_msg = f"📊 *Fixture Bet Builder: {fixture['team_h_name']} vs {fixture['team_a_name']}*\n"
-    builder_msg += generate_fixture_bet_builder(fixture, db)
-    client.close()
-    await update.message.reply_text(builder_msg, parse_mode="Markdown")
-
-async def status(update: Update, context: CallbackContext):
-    client, db = get_db()
-    user_count = db.users.count_documents({})
-    latest_players = db.players.find_one(sort=[("id", -1)])
-    latest_tactical = db.tactical_data.find_one(sort=[("last_updated", -1)])
-    msg = (
-        f"📊 Bot Status\n"
-        f"Registered Users: {user_count}\n"
-        f"Last FPL Update: {latest_players['minutes'] if latest_players else 'N/A'}\n"
-        f"Last SofaScore Lineup Update: {latest_tactical['last_updated'] if latest_tactical else 'N/A'}"
-    )
-    client.close()
-    await update.message.reply_text(msg)
 
 async def handle_callbacks(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     client, db = get_db()
     if query.data == "next_fixtures":
-        fixtures = get_next_fixtures(db)
-        if not fixtures:
-            await query.edit_message_text("No upcoming fixtures found.")
+        keyboard = show_fixture_menu(db)
+        await query.edit_message_text("📆 Select a fixture:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif query.data.startswith("select_"):
+        fixture_id = int(query.data.split("_")[1])
+        fixture = db.fixtures.find_one({"id": fixture_id})
+        if fixture:
+            msg = f"📊 *Fixture Bet Builder: {fixture['team_h_name']} vs {fixture['team_a_name']}*\n"
+            msg += generate_fixture_bet_builder(fixture, db)
+            await query.edit_message_text(msg, parse_mode="Markdown")
         else:
-            lines = ["📆 *Upcoming Fixtures:*"]
-            for ko, f in fixtures:
-                lines.append(f"• {f['team_h_name']} vs {f['team_a_name']} — {ko.strftime('%d/%m %H:%M UTC')}")
-            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            await query.edit_message_text("❌ Fixture not found.")
     client.close()
 
 # --- FLASK APP (for Render) ---
@@ -397,35 +302,3 @@ if __name__ == "__main__":
 
     # Run Telegram bot
     application.run_polling()
-
-# --- FUTURE IMPROVEMENTS / TODO ---
-"""
-1️⃣ Fixture Bet Builder Enhancements:
-   - Include multiple shot-on-target candidates per team.
-   - Consider midfielders and defenders for SOT picks (set-piece/long-range opportunities).
-   - Incorporate last 3–5 games stats for more accurate SOT predictions.
-   - Explore using xGOT (expected goals on target) if available from SofaScore for better accuracy.
-   - Add configurable thresholds (e.g., home_xg >= 1.2, away_xg >= 1.2) for BTTS / Result.
-
-2️⃣ Tactical Insights:
-   - Track player position shifts over time to identify consistent out-of-position trends.
-   - Include substitution impact on tactical shifts and high-ownership benched alerts.
-
-3️⃣ Notifications / UX:
-   - Add inline buttons for directly viewing Bet Builder for a selected fixture.
-   - Allow users to select favorite teams for focused alerts.
-   - Optionally add Telegram daily summary for all fixtures (morning or 1 hour before kickoff).
-
-4️⃣ Data / Stats:
-   - Capture corner, free kick, and penalty stats per player for advanced SOT predictions.
-   - Evaluate integration with additional free APIs for expected assists, xGOT, and expected goals conceded.
-
-5️⃣ Performance / Reliability:
-   - Consider caching SofaScore API responses to reduce repeated calls.
-   - Improve error handling for network timeouts / SofaScore data inconsistencies.
-   - Optimize MongoDB queries for large datasets as the season progresses.
-
-6️⃣ Betting Logic Ideas (Future Test):
-   - Test non-obvious SOT picks (midfielders/defenders) instead of always defaulting to top forwards.
-   - Combine tactical OOP shifts with Bet Builder insights for higher-value picks.
-"""
