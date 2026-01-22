@@ -1,6 +1,3 @@
-Yes that sounds good. Can you rewrite it WITHOUT changing any thing else, it is working well! 
-This is the code: 
-
 import os
 import time
 import threading
