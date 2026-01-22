@@ -513,6 +513,17 @@ if __name__ == "__main__":
     # Start Flask app for ping
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))), daemon=True).start()
 
+    # TEMP: Clear cached accumulator data on startup
+try:
+    client, db = get_db()
+    db.fixtures.delete_many({})
+    db.tactical_data.delete_many({})
+    db.lineups.delete_many({})
+    client.close()
+    logging.info("✅ Cleared cached fixtures, lineups, and tactical data.")
+except Exception as e:
+    logging.error(f"Error clearing cache: {e}")
+    
     # Run Telegram bot
     logging.info("Starting PL Lineup Bot...")
     application.run_polling()
