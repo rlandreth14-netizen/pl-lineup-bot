@@ -333,104 +333,101 @@ def generate_fixture_bet_builder(fixture, db):
         return "Could not generate builder."
 
 # --- GAMEWEEK ACCUMULATOR ---
-def get_team_form(team_id, db, last_n=5):
-    """Calculate form points from last_n matches for a team."""
-    try:
-        results = list(db.fixtures.find({
-            '$or': [{'team_h': team_id}, {'team_a': team_id}],
-            'finished': True
-        }).sort('kickoff_time', -1).limit(last_n))
-        points = 0
-        for f in results:
-            h_score = f.get('team_h_score')
-            a_score = f.get('team_a_score')
-            if h_score is None or a_score is None:
-                continue
-            if f['team_h'] == team_id:
-                if h_score > a_score: points += 3
-                elif h_score == a_score: points += 1
-            else:
-                if a_score > h_score: points += 3
-                elif a_score == h_score: points += 1
-        return points
-    except Exception as e:
-        logging.error(f"Team form error: {e}")
-        return 0
-
-def get_h2h_edge(home_id, away_id, db, last_n=3):
-    """Return H2H edge for home team based on last_n matches."""
-    try:
-        h2h_games = list(db.fixtures.find({
-            '$or': [
-                {'team_h': home_id, 'team_a': away_id},
-                {'team_h': away_id, 'team_a': home_id}
-            ],
-            'finished': True
-        }).sort('kickoff_time', -1).limit(last_n))
-        edge = 0
-        for f in h2h_games:
-            h_score = f.get('team_h_score')
-            a_score = f.get('team_a_score')
-            if h_score is None or a_score is None:
-                continue
-            if f['team_h'] == home_id and h_score > a_score:
-                edge += 0.5
-            elif f['team_a'] == home_id and a_score > h_score:
-                edge += 0.5
-            elif h_score == a_score:
-                edge += 0.0
-            else:
-                edge -= 0.5
-        return edge
-    except Exception as e:
-        logging.error(f"H2H edge error: {e}")
-        return 0
-
 def generate_gw_accumulator(db, top_n=5):
-    """Generate strongest bets for the current gameweek with xG threshold filter."""
+    """Generate strongest bets for the current gameweek using real xG, form, H2H, table position."""
     try:
-        # Get current gameweek from fixtures with event number
-        upcoming = list(db.fixtures.find({'started': False, 'finished': False, 'event': {'$ne': None}}))
+        upcoming = list(db.fixtures.find({
+            'started': False,
+            'finished': False,
+            'event': {'$ne': None}
+        }).sort('kickoff_time', 1))
+
         accumulator = []
 
         for f in upcoming:
             try:
-                # Skip if xG data missing
-                home_xg = f.get('home_xg')
-                away_xg = f.get('away_xg')
-                if home_xg is None or away_xg is None:
-                    continue
-
+                home_name = f['team_h_name']
+                away_name = f['team_a_name']
                 home_id = f['team_h']
                 away_id = f['team_a']
-                home_form = get_team_form(home_id, db)
-                away_form = get_team_form(away_id, db)
-                table_diff = f.get('away_table_pos', 10) - f.get('home_table_pos', 10)
-                h2h = get_h2h_edge(home_id, away_id, db)
 
-                final_strength = (home_xg - away_xg) + 0.1*(home_form - away_form) + 0.05*table_diff + h2h
+                home_stand = db.standings.find_one({"team_name": home_name})
+                away_stand = db.standings.find_one({"team_name": away_name})
 
-                # Apply threshold for "strong bets"
-                if final_strength >= 0.5:
-                    pick = f"{f['team_h_name']} to Win"
-                elif final_strength <= -0.5:
-                    pick = f"{f['team_a_name']} to Win"
+                if not home_stand or not away_stand:
+                    continue
+
+                home_played = home_stand.get('played', 1)
+                away_played = away_stand.get('played', 1)
+
+                home_xg_pg = home_stand.get('xG', 1.0) / max(home_played, 1)
+                away_xg_pg = away_stand.get('xG', 1.0) / max(away_played, 1)
+
+                home_xg_expected = home_xg_pg + 0.4  # home advantage
+                away_xg_expected = away_xg_pg
+
+                xg_diff = home_xg_expected - away_xg_expected
+
+                home_form = get_team_form(home_id, db, last_n=6)
+                away_form = get_team_form(away_id, db, last_n=6)
+                form_diff = home_form - away_form
+
+                home_pos = home_stand.get('position', 10)
+                away_pos = away_stand.get('position', 10)
+                table_diff = away_pos - home_pos
+
+                h2h = get_h2h_edge(home_id, away_id, db, last_n=5)
+
+                final_strength = (
+                    xg_diff * 1.5 +
+                    form_diff * 0.15 +
+                    table_diff * 0.08 +
+                    h2h * 0.4
+                )
+
+                if abs(final_strength) < 0.4:
+                    continue  # too weak
+
+                if final_strength >= 1.0:
+                    confidence = "High"
+                    stars = "⭐⭐⭐"
+                elif final_strength >= 0.6:
+                    confidence = "Medium"
+                    stars = "⭐⭐"
                 else:
-                    continue  # Skip weak bets
+                    confidence = "Low"
+                    stars = "⭐"
 
-                accumulator.append((abs(final_strength), f"{f['team_h_name']} vs {f['team_a_name']}: {pick}"))
+                pick = f"{home_name} to Win" if final_strength > 0 else f"{away_name} to Win"
+
+                accumulator.append({
+                    'strength': abs(final_strength),
+                    'match': f"{home_name} vs {away_name}",
+                    'pick': pick,
+                    'stars': stars,
+                    'confidence': confidence,
+                    'details': f"xG diff: {xg_diff:.2f} | Form: {form_diff} | Table: {table_diff} | H2H: {h2h:.1f}"
+                })
 
             except Exception as e:
-                logging.error(f"GW Accumulator Error for {f.get('team_h_name')} vs {f.get('team_a_name')}: {e}")
+                logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
+                continue
 
-        # Sort strongest bets first
-        accumulator.sort(reverse=True, key=lambda x: x[0])
-        top_bets = [x[1] for x in accumulator[:top_n]]
-        return "\n".join(top_bets) if top_bets else "No strong bets found."
+        accumulator.sort(key=lambda x: x['strength'], reverse=True)
+
+        if not accumulator:
+            return "No strong bets found this gameweek."
+
+        msg = "🔥 *Gameweek Accumulator – Strongest Bets*\n\n"
+        for item in accumulator[:top_n]:
+            msg += f"{item['stars']} **{item['match']}**: {item['pick']}**\n"
+            msg += f"   {item['details']}\n\n"
+
+        return msg
+
     except Exception as e:
         logging.error(f"Generate accumulator error: {e}")
         return "Error generating accumulator."
-
 # --- FIXTURE MENU SYSTEM ---
 def show_fixture_menu(db):
     fixtures = get_next_fixtures(db, limit=10)
