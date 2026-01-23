@@ -62,7 +62,6 @@ def save_standings_to_mongo(db, rows):
             "points": row["points"],
             "updated_at": datetime.utcnow()
         }
-
         collection.insert_one(doc)
         
 # --- CORE FUNCTIONS ---
