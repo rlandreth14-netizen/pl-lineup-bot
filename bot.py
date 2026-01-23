@@ -15,7 +15,10 @@ logging.basicConfig(level=logging.INFO)
 # --- CONFIG ---
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
-HIGH_OWNERSHIP_THRESHOLD = 20.0  # %
+HIGH_OWNERSHIP_THRESHOLD = 16.0  # %
+SOFASCORE_BASE_URL = "https://api.sofascore.com/api/v1"
+PL_TOURNAMENT_ID = 17
+PL_SEASON_ID = 76986
 
 SOFASCORE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -28,7 +31,33 @@ def get_db():
     client = MongoClient(MONGODB_URI)
     db = client['premier_league']
     return client, db
+def save_standings_to_mongo(rows):
+    """
+    Save standings rows to MongoDB
+    """
+    collection = db.standings
+    collection.delete_many({})  # clean overwrite
 
+    for row in rows:
+        team = row["team"]
+
+        doc = {
+            "team_id": team["id"],
+            "team_name": team["name"],
+            "position": row["position"],
+            "played": row["matches"],
+            "wins": row["wins"],
+            "draws": row["draws"],
+            "losses": row["losses"],
+            "goals_for": row["scoresFor"],
+            "goals_against": row["scoresAgainst"],
+            "goal_diff": row["goalDifference"],
+            "points": row["points"],
+            "updated_at": datetime.utcnow()
+        }
+
+   collection.insert_one(doc)
+        
 # --- CORE FUNCTIONS ---
 def fetch_sofascore_lineup(match_id, retries=2):
     url = f"https://api.sofascore.com/api/v1/event/{match_id}/lineups"
@@ -117,6 +146,21 @@ def get_next_fixtures(db, limit=5):
             upcoming.append((ko, f))
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:limit]
+
+def fetch_pl_standings():
+    """
+    Fetch Premier League standings from SofaScore
+    """
+    url = (
+        f"{SOFASCORE_BASE_URL}/unique-tournament/"
+        f"{PL_TOURNAMENT_ID}/season/{PL_SEASON_ID}/standings/total"
+    )
+
+    response = requests.get(url, timeout=15)
+    response.raise_for_status()
+
+    data = response.json()
+    return data["standings"][0]["rows"]
 
 # --- FIXTURE BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture):
@@ -340,6 +384,13 @@ def run_monitor():
             logging.error(f"Monitor Loop Error: {e}")
 
 # --- TELEGRAM COMMANDS ---
+    def update_standings_command(update, context):
+    try:
+        rows = fetch_pl_standings()
+        save_standings_to_mongo(rows)
+        update.message.reply_text("✅ Premier League standings updated.")
+    except Exception as e:
+        update.message.reply_text(f"❌ Failed to update standings:\n{e}")
 async def start(update: Update, context: CallbackContext):
     client, db = get_db()
     user_id = update.effective_chat.id
@@ -504,6 +555,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("gw_accumulator", gw_accumulator))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
+    dispatcher.add_handler(CommandHandler("update_standings", update_standings_command))
     
     # Start monitor in background
     monitor_thread = threading.Thread(target=run_monitor, daemon=True)
