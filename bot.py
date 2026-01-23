@@ -334,13 +334,14 @@ def generate_fixture_bet_builder(fixture, db):
 
 # --- GAMEWEEK ACCUMULATOR ---
 def generate_gw_accumulator(db, top_n=5):
-    """Generate strongest bets for the current gameweek using real xG, form, H2H, table position."""
+    """Generate strongest bets for the current gameweek using real xG, xGA, form, H2H, table position."""
     try:
+        # Get upcoming fixtures in the current/next gameweek
         upcoming = list(db.fixtures.find({
             'started': False,
             'finished': False,
             'event': {'$ne': None}
-        }).sort('kickoff_time', 1))
+        }).sort('kickoff_time', 1))  # Earliest first
 
         accumulator = []
 
@@ -355,48 +356,59 @@ def generate_gw_accumulator(db, top_n=5):
                 away_stand = db.standings.find_one({"team_name": away_name})
 
                 if not home_stand or not away_stand:
+                    logging.info(f"Skipping {home_name} vs {away_name} - no standings data")
                     continue
 
                 home_played = home_stand.get('played', 1)
                 away_played = away_stand.get('played', 1)
 
+                # Per-game rates
                 home_xg_pg = home_stand.get('xG', 1.0) / max(home_played, 1)
                 away_xg_pg = away_stand.get('xG', 1.0) / max(away_played, 1)
+                home_xga_pg = home_stand.get('xGA', 1.5) / max(home_played, 1)
+                away_xga_pg = away_stand.get('xGA', 1.5) / max(away_played, 1)
 
-                home_xg_expected = home_xg_pg + 0.4  # home advantage
+                # Apply home advantage + defensive penalty
+                home_xg_expected = home_xg_pg + 0.45  # home boost
                 away_xg_expected = away_xg_pg
+
+                # Reduce expected goals if facing strong defence
+                home_xg_expected *= (1 - (away_xga_pg / 2.2))  # opponent xGA impact
+                away_xg_expected *= (1 - (home_xga_pg / 2.2))
 
                 xg_diff = home_xg_expected - away_xg_expected
 
+                # Other factors
                 home_form = get_team_form(home_id, db, last_n=6)
                 away_form = get_team_form(away_id, db, last_n=6)
                 form_diff = home_form - away_form
 
                 home_pos = home_stand.get('position', 10)
                 away_pos = away_stand.get('position', 10)
-                table_diff = away_pos - home_pos
+                table_diff = away_pos - home_pos   # positive = home higher ranked
 
                 h2h = get_h2h_edge(home_id, away_id, db, last_n=5)
 
+                # Final strength score
                 final_strength = (
-                    xg_diff * 1.5 +
-                    form_diff * 0.15 +
-                    table_diff * 0.08 +
-                    h2h * 0.4
+                    xg_diff * 1.2 +           # core predictive factor
+                    form_diff * 0.4 +         # recent form
+                    table_diff * 0.25 +       # league standing
+                    h2h * 0.5                 # historical edge
                 )
 
-                if abs(final_strength) < 0.4:
-                    continue  # too weak
-
-                if final_strength >= 1.0:
+                # Confidence & stars
+                if final_strength >= 0.55:
                     confidence = "High"
                     stars = "⭐⭐⭐"
-                elif final_strength >= 0.6:
+                elif final_strength >= 0.30:
                     confidence = "Medium"
                     stars = "⭐⭐"
-                else:
+                elif final_strength >= 0.15:
                     confidence = "Low"
                     stars = "⭐"
+                else:
+                    continue  # skip very neutral games
 
                 pick = f"{home_name} to Win" if final_strength > 0 else f"{away_name} to Win"
 
@@ -413,10 +425,26 @@ def generate_gw_accumulator(db, top_n=5):
                 logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
                 continue
 
+        # If no strong bets, fallback to top 4 anyway
+        if not accumulator and upcoming:
+            logging.info("No strong bets — showing top 4 by strength anyway")
+            for f in upcoming[:4]:
+                # Minimal calculation for fallback
+                home_name = f['team_h_name']
+                away_name = f['team_a_name']
+                accumulator.append({
+                    'strength': 0.1,
+                    'match': f"{home_name} vs {away_name}",
+                    'pick': f"{home_name} or Draw",
+                    'stars': "⭐",
+                    'confidence': "Low",
+                    'details': "Fallback pick (weak edge)"
+                })
+
         accumulator.sort(key=lambda x: x['strength'], reverse=True)
 
         if not accumulator:
-            return "No strong bets found this gameweek."
+            return "No matches or data available this gameweek."
 
         msg = "🔥 *Gameweek Accumulator – Strongest Bets*\n\n"
         for item in accumulator[:top_n]:
@@ -428,6 +456,7 @@ def generate_gw_accumulator(db, top_n=5):
     except Exception as e:
         logging.error(f"Generate accumulator error: {e}")
         return "Error generating accumulator."
+        
 # --- FIXTURE MENU SYSTEM ---
 def show_fixture_menu(db):
     fixtures = get_next_fixtures(db, limit=10)
