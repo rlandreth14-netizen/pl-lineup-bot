@@ -40,31 +40,28 @@ def get_db():
     return client, db
 
 # Save standings to MongoDB
-def save_standings_to_mongo(db, rows):
-    """
-    Save the Premier League standings rows to MongoDB.
-    Overwrites any existing standings.
-    """
-    collection = db.standings
-    collection.delete_many({})  # clean overwrite
-
-    for row in rows:
-        team = row["team"]
-
-        doc = {
-            "team_id": team["id"],
-            "team_name": team["name"],
-            "position": row["position"],
-            "played": row["matches"],
-            "wins": row["wins"],
-            "draws": row["draws"],
-            "losses": row["losses"],
-            "goals_for": row["scoresFor"],
-            "goals_against": row["scoresAgainst"],
-            "goal_diff": row["goalDifference"],
-            "points": row["points"],
-            "updated_at": datetime.utcnow()
-        }
+doc = {
+    "team_id": team["id"],
+    "team_name": team["name"],
+    "position": row["position"],
+    "played": row["matches"],
+    "wins": row["wins"],
+    "draws": row["draws"],
+    "losses": row["losses"],
+    "goals_for": row["goals_for"],
+    "goals_against": row["goals_against"],
+    "goal_diff": row["goal_diff"],
+    "points": row["points"],
+    "xG": row.get("xG", 0.0),
+    "xGA": row.get("xGA", 0.0),
+    "xGD": row.get("xGD", 0.0),
+    "xPTS": row.get("xPTS", 0.0),
+    "xG_recent": row.get("xG_recent", 0.0),
+    "xGA_recent": row.get("xGA_recent", 0.0),
+    "xPTS_recent": row.get("xPTS_recent", 0.0),
+    "updated_at": datetime.utcnow()
+}
+        
         collection.insert_one(doc)
         
 # --- CORE FUNCTIONS ---
@@ -160,12 +157,14 @@ from understatapi import UnderstatClient
 
 def fetch_pl_standings():
     """
-    Fetch Premier League standings from Understat with xG and xGA added
+    Fetch Premier League standings from Understat with extra stats:
+    - Full season xG/xGA/xGD/xPTS
+    - Recent (last 6 matches) xG/xGA/xPTS
     """
     try:
         understat = UnderstatClient()
         league = understat.league(league="EPL")
-        team_data = league.get_team_data(season="2025")  # 2025 = 2025/26 season
+        team_data = league.get_team_data(season="2025")  # 2025/26
 
         rows = []
         for team_id, team_info in team_data.items():
@@ -183,10 +182,18 @@ def fetch_pl_standings():
             GA = sum(h.get('missed', 0) for h in history)
             PTS = sum(h.get('pts', 0) for h in history)
 
-            # New: sum xG and xGA from per-match history
+            # Full season totals
             xG_total = sum(float(h.get('xG', 0)) for h in history)
             xGA_total = sum(float(h.get('xGA', 0)) for h in history)
-            xGD = xG_total - xGA_total  # xG differential
+            xGD = xG_total - xGA_total
+            xPTS_total = sum(float(h.get('xpts', 0)) for h in history)
+
+            # Recent (last 6 matches) - more predictive
+            recent_history = history[-6:] if len(history) >= 6 else history
+            recent_M = len(recent_history)
+            recent_xG = sum(float(h.get('xG', 0)) for h in recent_history)
+            recent_xGA = sum(float(h.get('xGA', 0)) for h in recent_history)
+            recent_xPTS = sum(float(h.get('xpts', 0)) for h in recent_history)
 
             rows.append({
                 "team": {"id": team_id, "name": name},
@@ -194,20 +201,24 @@ def fetch_pl_standings():
                 "wins": W,
                 "draws": D,
                 "losses": L,
-                "scoresFor": G,
-                "scoresAgainst": GA,
-                "goalDifference": G - GA,
+                "goals_for": G,
+                "goals_against": GA,
+                "goal_diff": G - GA,
                 "points": PTS,
-                # Added fields
                 "xG": round(xG_total, 2),
                 "xGA": round(xGA_total, 2),
-                "xGD": round(xGD, 2)
+                "xGD": round(xGD, 2),
+                "xPTS": round(xPTS_total, 2),
+                # Recent stats
+                "xG_recent": round(recent_xG, 2),
+                "xGA_recent": round(recent_xGA, 2),
+                "xPTS_recent": round(recent_xPTS, 2),
+                "played": M  # for per-game calcs
             })
 
-        # Sort: points desc, then GD desc, then GF desc (standard tie-breakers)
-        rows.sort(key=lambda r: (-r["points"], -r["goalDifference"], -r["scoresFor"]))
+        # Sort by points desc, GD desc, GF desc
+        rows.sort(key=lambda r: (-r["points"], -r["goal_diff"], -r["goals_for"]))
 
-        # Assign positions
         for pos, row in enumerate(rows, start=1):
             row["position"] = pos
 
@@ -215,7 +226,7 @@ def fetch_pl_standings():
     except Exception as e:
         logging.error(f"Understat Fetch Error: {e}")
         raise
-        
+
 # --- FIXTURE BET BUILDER FUNCTIONS ---
 def generate_fixture_bet_builder(fixture, db):
     try:
@@ -361,20 +372,30 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                 home_played = home_stand.get('played', 1)
                 away_played = away_stand.get('played', 1)
 
-                # Per-game rates
-                home_xg_pg = home_stand.get('xG', 1.0) / max(home_played, 1)
-                away_xg_pg = away_stand.get('xG', 1.0) / max(away_played, 1)
-                home_xga_pg = home_stand.get('xGA', 1.5) / max(home_played, 1)
-                away_xga_pg = away_stand.get('xGA', 1.5) / max(away_played, 1)
+                # Prefer recent xG/xGA for prediction
+                home_xg_pg = home_stand.get('xG_recent', home_stand.get('xG', 1.0)) / min(6, home_played)
+                away_xg_pg = away_stand.get('xG_recent', away_stand.get('xG', 1.0)) / min(6, away_played)
+                home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / min(6, home_played)
+                away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / min(6, away_played)
 
-                # Home boost + defensive penalty
-                home_xg_expected = home_xg_pg + 0.45
-                away_xg_expected = away_xg_pg
+                # Use home/away split for expected (more accurate)
+                home_xg_expected = home_stand.get('home_xG_pg', home_xg_pg) + 0.45
+                away_xg_expected = away_stand.get('away_xG_pg', away_xg_pg)
 
-                home_xg_expected *= (1 - (away_xga_pg / 2.0))  # Stronger defence reduces expected
+                home_xg_expected *= (1 - (away_xga_pg / 2.0))
                 away_xg_expected *= (1 - (home_xga_pg / 2.0))
 
                 xg_diff = home_xg_expected - away_xg_expected
+
+                # Add recent xPTS per game diff
+                home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / min(6, home_played)
+                away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / min(6, away_played)
+                xpts_diff = home_xpts_pg - away_xpts_pg
+
+                # PPDA & deep as bonus factors
+                home_ppda = home_stand.get('ppda_avg', 20.0)
+                away_ppda = away_stand.get('ppda_avg', 20.0)
+                ppda_bonus = (away_ppda - home_ppda) * 0.02  # lower PPDA (better press) = small bonus
 
                 home_form = get_team_form(home_id, db, last_n=6)
                 away_form = get_team_form(away_id, db, last_n=6)
@@ -387,20 +408,22 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                 h2h = get_h2h_edge(home_id, away_id, db, last_n=5)
 
                 final_strength = (
-                    xg_diff * 1.3 +      # xG core
-                    form_diff * 0.5 +    # form boosted
-                    table_diff * 0.3 +   # table boosted
-                    h2h * 0.6            # H2H stronger
+                    xg_diff * 1.3 +
+                    xpts_diff * 0.8 +     # unlucky teams due results
+                    form_diff * 0.5 +
+                    table_diff * 0.3 +
+                    h2h * 0.6 +
+                    ppda_bonus
                 )
 
-                # Confidence & stars (pure win only)
+                # Confidence & stars - pure win picks only
                 if final_strength >= 0.50:
                     confidence = "High"
                     stars = "⭐⭐⭐"
                 elif final_strength >= 0.25:
                     confidence = "Medium"
                     stars = "⭐⭐"
-                elif final_strength >= 0.10:
+                elif final_strength >= 0.08:  # Lowered threshold to capture more
                     confidence = "Low"
                     stars = "⭐"
                 else:
@@ -413,22 +436,24 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                     'match': f"{home_name} vs {away_name}",
                     'pick': pick,
                     'stars': stars,
-                    'details': f"xG diff: {xg_diff:.2f} | Form diff: {form_diff} | Table diff: {table_diff} | H2H: {h2h:.1f}"
+                    'details': f"xG diff: {xg_diff:.2f} | xPTS diff: {xpts_diff:.2f} | Form: {form_diff} | Table: {table_diff} | H2H: {h2h:.1f}"
                 })
 
             except Exception as e:
                 logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
                 continue
 
-        # Fallback: if nothing qualified, force top 6 win picks (no draw)
-        if not accumulator and upcoming:
-            logging.info("No strong bets — forcing top 6 fallback win picks")
-            for f in upcoming[:6]:
+        # Enforce minimum 4 picks: if fewer qualified, force top 4-6 fallback win picks
+        if len(accumulator) < 4 and upcoming:
+            logging.info(f"Only {len(accumulator)} strong bets — forcing top {min(6, len(upcoming))} fallback win picks")
+            remaining_needed = 4 - len(accumulator)
+            fallback_matches = upcoming[len(accumulator): len(accumulator) + remaining_needed + 2]
+            for f in fallback_matches:
                 home_name = f['team_h_name']
                 accumulator.append({
                     'strength': 0.05,
                     'match': f"{home_name} vs {f['team_a_name']}",
-                    'pick': f"{home_name} to Win",  # default to home in fallback
+                    'pick': f"{home_name} to Win",
                     'stars': "⭐",
                     'details': "Fallback win pick (weak/no edge)"
                 })
