@@ -4,6 +4,9 @@ import threading
 import logging
 import requests
 import pandas as pd
+from bs4 import BeautifulSoup
+import json
+import base64
 from datetime import datetime, timezone
 from flask import Flask
 from pymongo import MongoClient
@@ -155,18 +158,69 @@ def get_next_fixtures(db, limit=5):
 
 def fetch_pl_standings():
     """
-    Fetch Premier League standings from SofaScore
+    Fetch Premier League standings from Understat (with xG)
     """
-    url = (
-        f"{SOFASCORE_BASE_URL}/unique-tournament/"
-        f"{PL_TOURNAMENT_ID}/season/{PL_SEASON_ID}/standings/total"
-    )
+    url = "https://understat.com/league/EPL/2025"
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-    response = requests.get(url, timeout=15)
-    response.raise_for_status()
+        # Find the script tag with teamsData
+        scripts = soup.find_all('script')
+        for script in scripts:
+            if 'teamsData' in str(script):
+                json_str = str(script).split('JSON.parse(\'')[1].split('\')')[0]  # Extract encoded JSON
+                decoded = base64.b64decode(json_str).decode('utf-8')  # Decode base64
+                data = json.loads(decoded)  # Parse to dict
+                break
+        else:
+            raise ValueError("teamsData script not found on Understat page")
 
-    data = response.json()
-    return data["standings"][0]["rows"]
+        # Build list of team standings by aggregating history
+        rows = []
+        for team_key in data:
+            team = data[team_key]
+            name = team['title']
+            team_id = team['id']  # Understat ID (str, but mongo can handle)
+            history = team['history']
+
+            M = len(history)
+            W = sum(1 for h in history if h['wins'] == 1)
+            D = sum(1 for h in history if h['draws'] == 1)
+            L = sum(1 for h in history if h['loses'] == 1)
+            G = sum(h['scored'] for h in history)
+            GA = sum(h['missed'] for h in history)
+            PTS = sum(h['pts'] for h in history)
+
+            # Optional: You can add these xG fields if you want to save them in mongo later
+            # xG_total = sum(h['xG'] for h in history)
+            # xGA_total = sum(h['xGA'] for h in history)
+            # xPTS_total = sum(h['xpts'] for h in history)
+
+            rows.append({
+                "team": {"id": team_id, "name": name},
+                "matches": M,
+                "wins": W,
+                "draws": D,
+                "losses": L,
+                "scoresFor": G,
+                "scoresAgainst": GA,
+                "goalDifference": G - GA,
+                "points": PTS
+            })
+
+        # Sort rows: PTS desc, goal diff desc, goals for desc
+        rows.sort(key=lambda r: (-r["points"], -r["goalDifference"], -r["scoresFor"]))
+
+        # Assign positions
+        for pos, row in enumerate(rows, start=1):
+            row["position"] = pos
+
+        return rows
+    except Exception as e:
+        logging.error(f"Understat Fetch Error: {e}")
+        raise  # Or return [] / fallback to SofaScore if you want
 
 # --- FIXTURE BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture):
