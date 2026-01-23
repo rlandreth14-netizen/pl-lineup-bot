@@ -217,33 +217,75 @@ def fetch_pl_standings():
         raise
         
 # --- FIXTURE BET BUILDER FUNCTIONS ---
-def evaluate_team_result(fixture):
+def generate_fixture_bet_builder(fixture, db):
     try:
-        home_xg = fixture.get('home_xg', 1.2)
-        away_xg = fixture.get('away_xg', 1.0)
-        home_team = fixture['team_h_name']
-        away_team = fixture['team_a_name']
+        builder = []
 
-        if home_xg - away_xg >= 0.5:
-            return f"{home_team} to Win"
-        elif away_xg - home_xg >= 0.5:
-            return f"{away_team} to Win"
-        else:
-            return "Draw / Skip"
-    except:
-        return "Draw / Skip"
+        # Fetch team data once here (used for both prediction and display)
+        home_team_name = fixture['team_h_name']
+        away_team_name = fixture['team_a_name']
 
-def evaluate_btts(fixture):
+        home_data = db.standings.find_one({"team_name": home_team_name})
+        away_data = db.standings.find_one({"team_name": away_team_name})
+
+        # Use real xG for predictions (as in previous suggestion)
+        result = evaluate_team_result(fixture, db)   # assumes you already updated this function
+        builder.append(f"• Result: {result}")
+
+        btts = evaluate_btts(fixture, db)
+        builder.append(f"• BTTS: {btts}")
+
+        # Add the xG context line – only if we have the data
+        if home_data and away_data:
+            builder.append(
+                f"• Season xG: {home_team_name} {home_data['xG']} "
+                f"({home_data['xGD']:+.2f}) vs {away_team_name} {away_data['xG']} "
+                f"({away_data['xGD']:+.2f})"
+            )
+
+        sofa_data = db.tactical_data.find_one({"match_id": fixture.get('sofascore_id')})
+        if not sofa_data:
+            return "\n".join(builder)
+
+        home_player = select_shot_player(fixture['team_h_name'], sofa_data.get('players', []), db)
+        away_player = select_shot_player(fixture['team_a_name'], sofa_data.get('players', []), db)
+
+        if home_player:
+            builder.append(f"• {home_player} 1+ SOT")
+        if away_player:
+            builder.append(f"• {away_player} 1+ SOT")
+
+        return "\n".join(builder)
+    except Exception as e:
+        logging.error(f"Bet Builder Error: {e}")
+        return "Could not generate builder."
+
+def evaluate_btts(fixture, db):
     try:
-        home_xg = fixture.get('home_xg', 1.2)
-        away_xg = fixture.get('away_xg', 1.2)
-        if home_xg >= 1.2 and away_xg >= 1.2:
+        home_team_name = fixture['team_h_name']
+        away_team_name = fixture['team_a_name']
+
+        home_data = db.standings.find_one({"team_name": home_team_name})
+        away_data = db.standings.find_one({"team_name": away_team_name})
+
+        if not home_data or not away_data:
+            return "Skip (no xG data)"
+
+        home_matches = home_data.get('played', 1)
+        away_matches = away_data.get('played', 1)
+
+        home_xg_per_game = home_data.get('xG', 1.0) / max(home_matches, 1)
+        away_xg_per_game = away_data.get('xG', 1.0) / max(away_matches, 1)
+
+        # BTTS likely if both teams create decent chances
+        if home_xg_per_game >= 1.3 and away_xg_per_game >= 1.3:
             return "Yes"
-        elif home_xg < 1.0 or away_xg < 1.0:
+        elif home_xg_per_game < 0.9 or away_xg_per_game < 0.9:
             return "No"
         else:
             return "Skip"
-    except:
+    except Exception as e:
+        logging.error(f"BTTS eval error: {e}")
         return "Skip"
 
 def select_shot_player(team_name, lineup, db):
@@ -266,19 +308,25 @@ def select_shot_player(team_name, lineup, db):
 def generate_fixture_bet_builder(fixture, db):
     try:
         builder = []
-        result = evaluate_team_result(fixture)
+
+        result = evaluate_team_result(fixture, db)  # Now uses DB xG
         builder.append(f"• Result: {result}")
-        btts = evaluate_btts(fixture)
+
+        btts = evaluate_btts(fixture, db)  # Now uses DB xG
         builder.append(f"• BTTS: {btts}")
 
         sofa_data = db.tactical_data.find_one({"match_id": fixture.get('sofascore_id')})
-        if not sofa_data: return "\n".join(builder)
+        if not sofa_data:
+            return "\n".join(builder)
 
         home_player = select_shot_player(fixture['team_h_name'], sofa_data.get('players', []), db)
         away_player = select_shot_player(fixture['team_a_name'], sofa_data.get('players', []), db)
 
-        if home_player: builder.append(f"• {home_player} 1+ SOT")
-        if away_player: builder.append(f"• {away_player} 1+ SOT")
+        if home_player:
+            builder.append(f"• {home_player} 1+ SOT")
+        if away_player:
+            builder.append(f"• {away_player} 1+ SOT")
+
         return "\n".join(builder)
     except Exception as e:
         logging.error(f"Bet Builder Error: {e}")
