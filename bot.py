@@ -39,28 +39,38 @@ def get_db():
     db = client['premier_league']
     return client, db
 
-# Save standings to MongoDB
-doc = {
-    "team_id": team["id"],
-    "team_name": team["name"],
-    "position": row["position"],
-    "played": row["matches"],
-    "wins": row["wins"],
-    "draws": row["draws"],
-    "losses": row["losses"],
-    "goals_for": row["goals_for"],
-    "goals_against": row["goals_against"],
-    "goal_diff": row["goal_diff"],
-    "points": row["points"],
-    "xG": row.get("xG", 0.0),
-    "xGA": row.get("xGA", 0.0),
-    "xGD": row.get("xGD", 0.0),
-    "xPTS": row.get("xPTS", 0.0),
-    "xG_recent": row.get("xG_recent", 0.0),
-    "xGA_recent": row.get("xGA_recent", 0.0),
-    "xPTS_recent": row.get("xPTS_recent", 0.0),
-    "updated_at": datetime.utcnow()
-}
+def save_standings_to_mongo(db, rows):
+    """
+    Save the Premier League standings rows to MongoDB.
+    Overwrites any existing standings.
+    """
+    collection = db.standings
+    collection.delete_many({})  # clean overwrite
+
+    for row in rows:
+        team = row["team"]
+
+        doc = {
+            "team_id": team["id"],
+            "team_name": team["name"],
+            "position": row["position"],
+            "played": row["matches"],
+            "wins": row["wins"],
+            "draws": row["draws"],
+            "losses": row["losses"],
+            "goals_for": row["goals_for"],
+            "goals_against": row["goals_against"],
+            "goal_diff": row["goal_diff"],
+            "points": row["points"],
+            "xG": row.get("xG", 0.0),
+            "xGA": row.get("xGA", 0.0),
+            "xGD": row.get("xGD", 0.0),
+            "xPTS": row.get("xPTS", 0.0),
+            "xG_recent": row.get("xG_recent", 0.0),
+            "xGA_recent": row.get("xGA_recent", 0.0),
+            "xPTS_recent": row.get("xPTS_recent", 0.0),
+            "updated_at": datetime.utcnow()
+        }
         
         collection.insert_one(doc)
         
