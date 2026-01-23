@@ -160,19 +160,17 @@ from understatapi import UnderstatClient
 
 def fetch_pl_standings():
     """
-    Fetch Premier League standings from Understat using understatapi library
+    Fetch Premier League standings from Understat with xG and xGA added
     """
     try:
         understat = UnderstatClient()
         league = understat.league(league="EPL")
-        # Get team data for the current season (2025 = 2025/26)
-        team_data = league.get_team_data(season="2025")
+        team_data = league.get_team_data(season="2025")  # 2025 = 2025/26 season
 
         rows = []
         for team_id, team_info in team_data.items():
-            # team_info is a dict with 'title' and 'history' (list of match dicts)
-            name = team_info['title']
-            history = team_info['history']
+            name = team_info.get('title', 'Unknown')
+            history = team_info.get('history', [])
 
             if not history:
                 continue
@@ -185,6 +183,11 @@ def fetch_pl_standings():
             GA = sum(h.get('missed', 0) for h in history)
             PTS = sum(h.get('pts', 0) for h in history)
 
+            # New: sum xG and xGA from per-match history
+            xG_total = sum(float(h.get('xG', 0)) for h in history)
+            xGA_total = sum(float(h.get('xGA', 0)) for h in history)
+            xGD = xG_total - xGA_total  # xG differential
+
             rows.append({
                 "team": {"id": team_id, "name": name},
                 "matches": M,
@@ -194,10 +197,14 @@ def fetch_pl_standings():
                 "scoresFor": G,
                 "scoresAgainst": GA,
                 "goalDifference": G - GA,
-                "points": PTS
+                "points": PTS,
+                # Added fields
+                "xG": round(xG_total, 2),
+                "xGA": round(xGA_total, 2),
+                "xGD": round(xGD, 2)
             })
 
-        # Sort by points desc, GD desc, GF desc
+        # Sort: points desc, then GD desc, then GF desc (standard tie-breakers)
         rows.sort(key=lambda r: (-r["points"], -r["goalDifference"], -r["scoresFor"]))
 
         # Assign positions
@@ -206,9 +213,9 @@ def fetch_pl_standings():
 
         return rows
     except Exception as e:
-        logging.error(f"UnderstatAPI Fetch Error: {e}")
-        raise  # Or return [] to avoid crashing the command
-
+        logging.error(f"Understat Fetch Error: {e}")
+        raise
+        
 # --- FIXTURE BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture):
     try:
