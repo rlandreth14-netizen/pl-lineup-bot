@@ -156,21 +156,23 @@ def get_next_fixtures(db, limit=5):
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:limit]
 
+from understatapi import UnderstatClient
+
 def fetch_pl_standings():
     """
-    Fetch Premier League standings from Understat via their data endpoint
+    Fetch Premier League standings from Understat using understatapi library
     """
-    url = "https://understat.com/main/getTeamsData/EPL/2025"  # This is the current internal endpoint pattern
     try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        data = response.json()  # Should return a dict with team data
+        understat = UnderstatClient()
+        league = understat.league(league="EPL")
+        # Get team data for the current season (2025 = 2025/26)
+        team_data = league.get_team_data(season="2025")
 
         rows = []
-        for team in data:  # Assuming list of team objects
-            name = team.get('title', 'Unknown')
-            team_id = team.get('id')
-            history = team.get('history', [])
+        for team_id, team_info in team_data.items():
+            # team_info is a dict with 'title' and 'history' (list of match dicts)
+            name = team_info['title']
+            history = team_info['history']
 
             if not history:
                 continue
@@ -195,7 +197,7 @@ def fetch_pl_standings():
                 "points": PTS
             })
 
-        # Sort: points desc, GD desc, GF desc
+        # Sort by points desc, GD desc, GF desc
         rows.sort(key=lambda r: (-r["points"], -r["goalDifference"], -r["scoresFor"]))
 
         # Assign positions
@@ -204,8 +206,8 @@ def fetch_pl_standings():
 
         return rows
     except Exception as e:
-        logging.error(f"Understat Fetch Error: {e}")
-        raise
+        logging.error(f"UnderstatAPI Fetch Error: {e}")
+        raise  # Or return [] to avoid crashing the command
 
 # --- FIXTURE BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture):
