@@ -31,6 +31,7 @@ def get_db():
     client = MongoClient(MONGODB_URI)
     db = client['premier_league']
     return client, db
+    
 def save_standings_to_mongo(rows):
     """
     Save standings rows to MongoDB
