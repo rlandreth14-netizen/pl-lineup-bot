@@ -4,3 +4,4 @@ pymongo
 python-telegram-bot
 flask
 beautifulsoup4
+understatapi
