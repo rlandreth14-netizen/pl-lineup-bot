@@ -27,14 +27,20 @@ SOFASCORE_HEADERS = {
 }
 
 # --- MONGO HELPER ---
+from pymongo import MongoClient
+from datetime import datetime
+
+# Connect to MongoDB
 def get_db():
     client = MongoClient(MONGODB_URI)
     db = client['premier_league']
     return client, db
-    
-def save_standings_to_mongo(rows):
+
+# Save standings to MongoDB
+def save_standings_to_mongo(db, rows):
     """
-    Save standings rows to MongoDB
+    Save the Premier League standings rows to MongoDB.
+    Overwrites any existing standings.
     """
     collection = db.standings
     collection.delete_many({})  # clean overwrite
@@ -57,7 +63,7 @@ def save_standings_to_mongo(rows):
             "updated_at": datetime.utcnow()
         }
 
-   collection.insert_one(doc)
+        collection.insert_one(doc)
         
 # --- CORE FUNCTIONS ---
 def fetch_sofascore_lineup(match_id, retries=2):
