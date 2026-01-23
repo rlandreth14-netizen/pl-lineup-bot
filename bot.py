@@ -390,13 +390,17 @@ def run_monitor():
             logging.error(f"Monitor Loop Error: {e}")
 
 # --- TELEGRAM COMMANDS ---
-    def update_standings_command(update, context):
+ async def update_standings_command(update: Update, context: CallbackContext):
+    client, db = get_db()
     try:
         rows = fetch_pl_standings()
-        save_standings_to_mongo(rows)
-        update.message.reply_text("✅ Premier League standings updated.")
+        save_standings_to_mongo(db, rows)
+        await update.message.reply_text("✅ Premier League standings updated.")
     except Exception as e:
-        update.message.reply_text(f"❌ Failed to update standings:\n{e}")
+        await update.message.reply_text(f"❌ Failed to update standings:\n{e}")
+    finally:
+        client.close()
+        
 async def start(update: Update, context: CallbackContext):
     client, db = get_db()
     user_id = update.effective_chat.id
@@ -561,7 +565,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("gw_accumulator", gw_accumulator))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
-    dispatcher.add_handler(CommandHandler("update_standings", update_standings_command))
+    application.add_handler(CommandHandler("update_standings", update_standings_command))
     
     # Start monitor in background
     monitor_thread = threading.Thread(target=run_monitor, daemon=True)
