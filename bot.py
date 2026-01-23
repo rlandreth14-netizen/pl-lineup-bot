@@ -390,7 +390,7 @@ def run_monitor():
             logging.error(f"Monitor Loop Error: {e}")
 
 # --- TELEGRAM COMMANDS ---
- async def update_standings_command(update: Update, context: CallbackContext):
+async def update_standings_command(update: Update, context: CallbackContext):
     client, db = get_db()
     try:
         rows = fetch_pl_standings()
