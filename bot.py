@@ -73,34 +73,51 @@ def save_standings_to_mongo(db, rows):
         }
         collection.insert_one(doc)
 
-# --- SOFASCORE FUNCTIONS ---
-def fetch_sofascore_lineup(match_id, retries=2):
-    url = f"{SOFASCORE_BASE_URL}/event/{match_id}/lineups"
+def fetch_pl_lineup(match_id, retries=2):
+    """Fetch lineups from official Premier League website (replace SofaScore)"""
+    url = f"https://www.premierleague.com/en/match/{match_id}/lineups"  # Assuming match_id is FPL ID; adjust if needed
     for attempt in range(retries):
         try:
-            res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+            res = requests.get(url, timeout=10)
             if res.status_code != 200:
-                logging.warning(f"SofaScore returned {res.status_code}")
+                logging.warning(f"PL lineup returned {res.status_code}")
                 time.sleep(2)
                 continue
-            data = res.json()
+            
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
             players = []
-            for side in ['home', 'away']:
-                team_data = data.get(side)
-                if not team_data: continue
-                team_name = team_data['team']['name']
-                for entry in team_data.get('players', []):
-                    p = entry.get('player')
-                    if not p: continue
+            
+            # Find starting XI and subs sections (PL uses class 'lineup' or 'team-lineup')
+            lineup_sections = soup.find_all('div', class_='team-lineup')  # Adjust class based on page (inspect element)
+            for section in lineup_sections:
+                team_name = section.find('h3').text.strip() if section.find('h3') else 'Unknown'
+                
+                # Starting XI
+                starting = section.find('div', class_='starting-lineup')
+                for player in starting.find_all('div', class_='player'):
+                    name = player.find('span', class_='player-name').text.strip()
+                    pos = player.find('span', class_='player-position').text.strip()
                     players.append({
-                        "name": p.get('name', 'Unknown'),
-                        "sofa_id": p.get('id'),
-                        "tactical_pos": entry.get('position', 'Unknown'),
+                        "name": name,
+                        "tactical_pos": pos,
                         "team": team_name
                     })
+                
+                # Substitutes
+                subs = section.find('div', class_='substitutes')
+                for player in subs.find_all('div', class_='player'):
+                    name = player.find('span', class_='player-name').text.strip()
+                    pos = player.find('span', class_='player-position').text.strip()
+                    players.append({
+                        "name": name,
+                        "tactical_pos": pos,
+                        "team": team_name  # Mark as sub if needed
+                    })
+            
             return players
         except Exception as e:
-            logging.error(f"SofaScore error (attempt {attempt+1}): {e}")
+            logging.error(f"PL lineup error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return None
 
