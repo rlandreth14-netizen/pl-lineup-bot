@@ -25,9 +25,13 @@ PL_TOURNAMENT_ID = 17
 PL_SEASON_ID = 76986
 
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.sofascore.com/",
-    "Origin": "https://www.sofascore.com"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.sofascore.com/tournament/football/england/premier-league/17",
+    "Accept": "application/json",
+    "Cache-Control": "no-cache",
+    "Origin": "https://www.sofascore.com",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin"
 }
 
 # --- MONGO HELPER ---
