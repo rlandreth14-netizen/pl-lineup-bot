@@ -795,4 +795,3 @@ if __name__ == "__main__":
     
     logging.info("Starting PL Lineup Bot...")
     application.run_polling()
-```1.
