@@ -70,6 +70,9 @@ def save_standings_to_mongo(db, rows):
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
             "updated_at": datetime.utcnow()
+            "ppda_avg": row.get("ppda_avg", 20.0)
+            "home_xG_pg": row.get("home_xG_pg", 1.0),
+            "away_xG_pg": row.get("away_xG_pg", 1.0),
         }
         
         collection.insert_one(doc)
@@ -217,6 +220,8 @@ def fetch_pl_standings():
     Fetch Premier League standings from Understat with extra stats:
     - Full season xG/xGA/xGD/xPTS
     - Recent (last 6 matches) xG/xGA/xPTS
+    - Home/Away xG per game split
+    - Average PPDA (pressing)
     """
     try:
         understat = UnderstatClient()
@@ -244,13 +249,21 @@ def fetch_pl_standings():
             xGA_total = sum(float(h.get('xGA', 0)) for h in history)
             xGD = xG_total - xGA_total
             xPTS_total = sum(float(h.get('xpts', 0)) for h in history)
+            ppda_avg = sum(float(h.get('ppda', {}).get('def', 20.0)) for h in history) / max(M, 1)
 
-            # Recent (last 6 matches) - more predictive
+            # Recent (last 6 matches)
             recent_history = history[-6:] if len(history) >= 6 else history
-            recent_M = len(recent_history)
             recent_xG = sum(float(h.get('xG', 0)) for h in recent_history)
             recent_xGA = sum(float(h.get('xGA', 0)) for h in recent_history)
             recent_xPTS = sum(float(h.get('xpts', 0)) for h in recent_history)
+
+            # Home/Away xG split
+            home_history = [h for h in history if h.get('h_a') == 'h']
+            away_history = [h for h in history if h.get('h_a') == 'a']
+            home_xG = sum(float(h.get('xG', 0)) for h in home_history)
+            away_xG = sum(float(h.get('xG', 0)) for h in away_history)
+            home_matches = len(home_history) or 1
+            away_matches = len(away_history) or 1
 
             rows.append({
                 "team": {"id": team_id, "name": name},
@@ -266,14 +279,17 @@ def fetch_pl_standings():
                 "xGA": round(xGA_total, 2),
                 "xGD": round(xGD, 2),
                 "xPTS": round(xPTS_total, 2),
+                "ppda_avg": round(ppda_avg, 2),
                 # Recent stats
                 "xG_recent": round(recent_xG, 2),
                 "xGA_recent": round(recent_xGA, 2),
                 "xPTS_recent": round(recent_xPTS, 2),
-                "played": M  # for per-game calcs
+                # Home/Away xG per game
+                "home_xG_pg": round(home_xG / home_matches, 2),
+                "away_xG_pg": round(away_xG / away_matches, 2),
+                "played": M
             })
 
-        # Sort by points desc, GD desc, GF desc
         rows.sort(key=lambda r: (-r["points"], -r["goal_diff"], -r["goals_for"]))
 
         for pos, row in enumerate(rows, start=1):
@@ -478,7 +494,7 @@ def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 5
                     ppda_bonus
                 )
 
-                # Debug logging — very useful to see why picks are weak
+                # Debug logging — see why picks are weak/high
                 logging.info(f"{home_name} vs {away_name} | strength: {final_strength:.2f} | xG_diff: {xg_diff:.2f} | xPTS_diff: {xpts_diff:.2f} | form_diff: {form_diff} | table_diff: {table_diff} | H2H: {h2h:.1f} | PPDA_bonus: {ppda_bonus:.2f}")
 
                 # Confidence & stars - pure win picks only
