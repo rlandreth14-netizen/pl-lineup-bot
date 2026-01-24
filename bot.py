@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
 HIGH_OWNERSHIP_THRESHOLD = 16.0
-SOFASCORE_BASE_URL = "https://api.sofascore.com/api/v1"
+SOFASCORE_BASE_URL = "https://www.sofascore.com/api/v1"
 PL_TOURNAMENT_ID = 17
 PL_SEASON_ID = 76986
 
