@@ -163,6 +163,53 @@ def get_next_fixtures(db, limit=5):
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:limit]
 
+# === ADD THE HELPERS HERE ===
+def get_home_form(team_id, db, last_n=6):
+    """Points from last N home games for the team."""
+    try:
+        home_games = list(db.fixtures.find({
+            'team_h': team_id,
+            'finished': True
+        }).sort('kickoff_time', -1).limit(last_n))
+        
+        points = 0
+        for f in home_games:
+            h_score = f.get('team_h_score')
+            a_score = f.get('team_a_score')
+            if h_score is None or a_score is None:
+                continue
+            if h_score > a_score:
+                points += 3
+            elif h_score == a_score:
+                points += 1
+        return points
+    except Exception as e:
+        logging.error(f"Home form error for team {team_id}: {e}")
+        return 0
+
+def get_away_form(team_id, db, last_n=6):
+    """Points from last N away games for the team."""
+    try:
+        away_games = list(db.fixtures.find({
+            'team_a': team_id,
+            'finished': True
+        }).sort('kickoff_time', -1).limit(last_n))
+        
+        points = 0
+        for f in away_games:
+            h_score = f.get('team_h_score')
+            a_score = f.get('team_a_score')
+            if h_score is None or a_score is None:
+                continue
+            if a_score > h_score:
+                points += 3
+            elif a_score == h_score:
+                points += 1
+        return points
+    except Exception as e:
+        logging.error(f"Away form error for team {team_id}: {e}")
+        return 0
+
 from understatapi import UnderstatClient
 
 def fetch_pl_standings():
@@ -354,8 +401,8 @@ def generate_fixture_bet_builder(fixture, db):
         return "Could not generate builder."
 
 # --- GAMEWEEK ACCUMULATOR ---
-def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
-    """Generate strongest win bets using real xG, xGA, form, H2H, table position."""
+def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 5
+    """Generate strongest win bets using real xG, xGA, form (home/away), H2H, table position."""
     try:
         # Get upcoming fixtures in current/next gameweek
         upcoming = list(db.fixtures.find({
@@ -388,11 +435,14 @@ def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
                 home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / min(6, home_played)
                 away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / min(6, away_played)
 
-                # Home/away split if available
-                home_xg_expected = home_stand.get('home_xG_pg', home_xg_pg) + 0.45
-                away_xg_expected = away_stand.get('away_xG_pg', away_xg_pg)
+                # Prefer home/away split if present
+                home_xg_pg = home_stand.get('home_xG_pg', home_xg_pg)
+                away_xg_pg = away_stand.get('away_xG_pg', away_xg_pg)
 
-                # Defensive penalty
+                # Home boost + defensive penalty
+                home_xg_expected = home_xg_pg + 0.45
+                away_xg_expected = away_xg_pg
+
                 home_xg_expected *= (1 - (away_xga_pg / 2.0))
                 away_xg_expected *= (1 - (home_xga_pg / 2.0))
 
@@ -403,14 +453,14 @@ def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
                 away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / min(6, away_played)
                 xpts_diff = home_xpts_pg - away_xpts_pg
 
-                # PPDA bonus (lower PPDA = better press)
+                # PPDA bonus
                 home_ppda = home_stand.get('ppda_avg', 20.0)
                 away_ppda = away_stand.get('ppda_avg', 20.0)
                 ppda_bonus = (away_ppda - home_ppda) * 0.05
 
-                # Form (overall for now — can split to home/away later)
-                home_form = get_team_form(home_id, db, last_n=6)
-                away_form = get_team_form(away_id, db, last_n=6)
+                # Home/away specific form
+                home_form = get_home_form(home_id, db, last_n=6)
+                away_form = get_away_form(away_id, db, last_n=6)
                 form_diff = home_form - away_form
 
                 home_pos = home_stand.get('position', 10)
@@ -422,23 +472,23 @@ def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
                 final_strength = (
                     xg_diff * 1.5 +
                     xpts_diff * 1.0 +     # unlucky teams due results
-                    form_diff * 0.7 +     # form boosted
-                    table_diff * 0.5 +    # table position matters
+                    form_diff * 0.7 +     # home/away form boosted
+                    table_diff * 0.5 +
                     h2h * 0.8 +
                     ppda_bonus
                 )
 
-                # Debug logging — see why each match scores low/high
+                # Debug logging — very useful to see why picks are weak
                 logging.info(f"{home_name} vs {away_name} | strength: {final_strength:.2f} | xG_diff: {xg_diff:.2f} | xPTS_diff: {xpts_diff:.2f} | form_diff: {form_diff} | table_diff: {table_diff} | H2H: {h2h:.1f} | PPDA_bonus: {ppda_bonus:.2f}")
 
-                # Confidence & stars — pure win picks only
+                # Confidence & stars - pure win picks only
                 if final_strength >= 0.45:
                     confidence = "High"
                     stars = "⭐⭐⭐"
                 elif final_strength >= 0.20:
                     confidence = "Medium"
                     stars = "⭐⭐"
-                elif final_strength >= 0.05:  # Very low skip threshold
+                elif final_strength >= 0.05:
                     confidence = "Low"
                     stars = "⭐"
                 else:
@@ -451,7 +501,7 @@ def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
                     'match': f"{home_name} vs {away_name}",
                     'pick': pick,
                     'stars': stars,
-                    'details': f"xG diff: {xg_diff:.2f} | xPTS diff: {xpts_diff:.2f} | Form: {form_diff} | Table: {table_diff} | H2H: {h2h:.1f}"
+                    'details': f"xG diff: {xg_diff:.2f} | xPTS diff: {xpts_diff:.2f} | Form diff: {form_diff} | Table diff: {table_diff} | H2H: {h2h:.1f}"
                 })
 
             except Exception as e:
