@@ -113,8 +113,10 @@ def get_today_sofascore_matches():
     date_str = datetime.now().strftime("%Y-%m-%d")
     url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
     try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
-        return [e for e in res.get('events', []) 
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+        logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
+        data = res.json()
+        return [e for e in data.get('events', []) 
                 if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
     except Exception as e:
         logging.error(f"Error fetching matches: {e}")
@@ -793,3 +795,4 @@ if __name__ == "__main__":
     
     logging.info("Starting PL Lineup Bot...")
     application.run_polling()
+```.close()
