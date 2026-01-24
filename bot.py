@@ -25,19 +25,9 @@ PL_TOURNAMENT_ID = 17
 PL_SEASON_ID = 76986
 
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://www.sofascore.com/",
-    "Origin": "https://www.sofascore.com",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-    "Sec-Ch-Ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"macOS"',
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
+    "Origin": "https://www.sofascore.com"
 }
 
 TEAM_NAME_MAP = {
@@ -123,10 +113,8 @@ def get_today_sofascore_matches():
     date_str = datetime.now().strftime("%Y-%m-%d")
     url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
     try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
-        logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
-        data = res.json()
-        return [e for e in data.get('events', []) 
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
+        return [e for e in res.get('events', []) 
                 if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
     except Exception as e:
         logging.error(f"Error fetching matches: {e}")
