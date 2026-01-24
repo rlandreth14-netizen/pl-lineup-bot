@@ -6,12 +6,13 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, UTC
 from flask import Flask
 from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 from understatapi import UnderstatClient
+from playwright.sync_api import sync_playwright
 
 logging.basicConfig(level=logging.INFO)
 
@@ -60,7 +61,7 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.utcnow(),
+            "updated_at": datetime.now(UTC),
             "ppda_avg": row.get("ppda_avg", 20.0),
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
@@ -68,7 +69,7 @@ def save_standings_to_mongo(db, rows):
         collection.insert_one(doc)
 
 def get_pl_match_id(fixture, retries=2):
-    """Map FPL fixture to PL match ID by scraping fixtures page."""
+    """Map FPL fixture to PL match ID by scraping fixtures page with Playwright."""
     home = fixture['team_h_name']
     away = fixture['team_a_name']
     ko_time = fixture.get('kickoff_time')
@@ -78,71 +79,75 @@ def get_pl_match_id(fixture, retries=2):
     url = "https://www.premierleague.com/fixtures"
     for attempt in range(retries):
         try:
-            res = requests.get(url, headers=PL_HEADERS, timeout=10)
-            if res.status_code != 200:
-                logging.warning(f"PL fixtures returned {res.status_code}")
-                time.sleep(2)
-                continue
-            soup = BeautifulSoup(res.text, 'html.parser')
-            match_containers = soup.find_all('a', class_='matchFixtureContainer')
-            for m in match_containers:
-                h_team = m.find('span', class_='teamName').find('abbr')['title'].strip()
-                a_team = m.find('span', class_='teamName').find('abbr', recursive=False)['title'].strip()  # Second teamName
-                m_date = m.find('time')['datetime']  # ISO date
-                if h_team == home and a_team == away and date_str in m_date:
-                    pl_id = m['data-comp-match-item']
-                    return pl_id
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url)
+                page.wait_for_selector('.matchFixtureContainer', timeout=10000)  # Wait for JS to load
+                content = page.content()
+                soup = BeautifulSoup(content, 'html.parser')
+                match_containers = soup.find_all('a', class_='matchFixtureContainer')
+                for m in match_containers:
+                    team_spans = m.find_all('span', class_='teamName')
+                    if len(team_spans) < 2:
+                        continue
+                    h_team = team_spans[0].find('abbr').get('title', '').strip()
+                    a_team = team_spans[1].find('abbr').get('title', '').strip()
+                    m_date = m.find('time').get('datetime', '') if m.find('time') else ''
+                    if h_team == home and a_team == away and date_str in m_date:
+                        pl_id = m.get('data-comp-match-item')
+                        browser.close()
+                        return pl_id
+                browser.close()
         except Exception as e:
             logging.error(f"PL match ID error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return None
 
 def fetch_pl_lineup(pl_match_id, retries=2):
-    """Fetch lineups from official Premier League website."""
+    """Fetch lineups from official Premier League website with Playwright."""
     url = f"https://www.premierleague.com/match/{pl_match_id}"
     for attempt in range(retries):
         try:
-            res = requests.get(url, headers=PL_HEADERS, timeout=10)
-            if res.status_code != 200:
-                logging.warning(f"PL lineup returned {res.status_code}")
-                time.sleep(2)
-                continue
-            
-            soup = BeautifulSoup(res.text, 'html.parser')
-            players = []
-            
-            team_containers = soup.find_all('div', class_='matchLineupTeamContainer')
-            for team in team_containers:
-                team_name = team.find('div', class_='teamName').text.strip()
-                
-                # Starting XI
-                starting_list = team.find('ul', class_='playerList')
-                if starting_list:
-                    for li in starting_list.find_all('li', class_='player'):
-                        name = li.find('span', class_='name').text.strip()
-                        # Positions not explicitly text-based; use 'Unknown' or infer if needed
-                        pos = 'Unknown'
-                        players.append({
-                            "name": name,
-                            "tactical_pos": pos,
-                            "team": team_name,
-                            "starting": True
-                        })
-                
-                # Substitutes
-                subs_list = team.find('div', class_='substitutesContainer').find('ul')
-                if subs_list:
-                    for li in subs_list.find_all('li', class_='player'):
-                        name = li.find('span', class_='name').text.strip()
-                        pos = 'Unknown'
-                        players.append({
-                            "name": name,
-                            "tactical_pos": pos,
-                            "team": team_name,
-                            "starting": False
-                        })
-            
-            return players
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url)
+                page.wait_for_selector('.matchLineupTeamContainer', timeout=10000)  # Wait for JS
+                content = page.content()
+                soup = BeautifulSoup(content, 'html.parser')
+                players = []
+                team_containers = soup.find_all('div', class_='matchLineupTeamContainer')
+                for team in team_containers:
+                    team_name = team.find('div', class_='teamName').text.strip() if team.find('div', class_='teamName') else 'Unknown'
+                    # Starting XI
+                    starting_list = team.find('ul', class_='playerList')
+                    if starting_list:
+                        for li in starting_list.find_all('li', class_='player'):
+                            name = li.find('span', class_='name').text.strip() if li.find('span', class_='name') else 'Unknown'
+                            pos = 'Unknown'  # Positions may not be text-based
+                            players.append({
+                                "name": name,
+                                "tactical_pos": pos,
+                                "team": team_name,
+                                "starting": True
+                            })
+                    # Substitutes
+                    subs_container = team.find('div', class_='substitutesContainer')
+                    if subs_container:
+                        subs_list = subs_container.find('ul')
+                        if subs_list:
+                            for li in subs_list.find_all('li', class_='player'):
+                                name = li.find('span', class_='name').text.strip() if li.find('span', class_='name') else 'Unknown'
+                                pos = 'Unknown'
+                                players.append({
+                                    "name": name,
+                                    "tactical_pos": pos,
+                                    "team": team_name,
+                                    "starting": False
+                                })
+                browser.close()
+                return players
         except Exception as e:
             logging.error(f"PL lineup error (attempt {attempt+1}): {e}")
             time.sleep(2)
@@ -501,7 +506,7 @@ def generate_gw_accumulator(db, top_n=6):
                     xg_diff += 0.2
 
                 home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / max(1, min(6, home_played))
-                away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / max(1, min(6, away_played))
+                away_xpts_pg = away_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / max(1, min(6, away_played))
                 xpts_diff = home_xpts_pg - away_xpts_pg
 
                 home_ppda = home_stand.get('ppda_avg', 20.0)
@@ -621,7 +626,7 @@ def run_monitor():
                                     "home_team": f['team_h_name'],
                                     "away_team": f['team_a_name'],
                                     "players": lineup,
-                                    "last_updated": datetime.now(timezone.utc)
+                                    "last_updated": datetime.now(UTC)
                                 }},
                                 upsert=True
                             )
@@ -652,7 +657,7 @@ def run_monitor():
 async def start(update: Update, context: CallbackContext):
     client, db = get_db()
     user_id = update.effective_chat.id
-    db.users.update_one({'chat_id': user_id}, {'$set': {'chat_id': user_id, 'joined': datetime.now()}}, upsert=True)
+    db.users.update_one({'chat_id': user_id}, {'$set': {'chat_id': user_id, 'joined': datetime.now(UTC)}}, upsert=True)
     
     await update.message.reply_text(
         "👋 *Welcome to PL Lineup Bot!*\n\n"
@@ -734,7 +739,7 @@ async def update_data(update: Update, context: CallbackContext):
                             "home_team": event['team_h_name'],
                             "away_team": event['team_a_name'],
                             "players": lineup,
-                            "last_updated": datetime.now(timezone.utc)
+                            "last_updated": datetime.now(UTC)
                         }},
                         upsert=True
                     )
