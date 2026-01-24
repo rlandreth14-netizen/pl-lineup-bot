@@ -31,21 +31,12 @@ SOFASCORE_HEADERS = {
 }
 
 TEAM_NAME_MAP = {
-    "Man City": "Manchester City",
-    "Man Utd": "Manchester United",
-    "Newcastle": "Newcastle United",
-    "Spurs": "Tottenham Hotspur",
-    "Nott'm Forest": "Nottingham Forest",
-    "Wolves": "Wolverhampton",
     "Brighton": "Brighton & Hove Albion",
-    "West Ham": "West Ham United",
-    "Leicester": "Leicester City",
-    "Ipswich": "Ipswich Town",
-    "Leeds": "Leeds United",
-    "Southampton": "Southampton",
-    "Burnley": "Burnley",
-    "Sunderland": "Sunderland",
-    # Add more if needed for other teams
+    "Nott'm Forest": "Forest",
+    "Spurs": "Tottenham",
+    "Leeds United": "Leeds",
+    "Ipswich": "Ipswich",
+    "Leicester": "Leicester",
 }
 
 # --- MONGO HELPER ---
@@ -559,13 +550,15 @@ def run_monitor():
             client, db = get_db()
             now = datetime.now(timezone.utc)
             
+            sofa_events = get_today_sofascore_matches()
+            logging.info(f"Fetched {len(sofa_events)} SofaScore events")
+            
             for f in db.fixtures.find({'kickoff_time': {'$exists': True}, 'finished': False, 'alert_sent': {'$ne': True}}):
                 ko = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
                 diff_mins = (ko - now).total_seconds() / 60
                 
-                if 59 <= diff_mins <= 61:
+                if -60 <= diff_mins <= 61:
                     logging.info(f"Checking: {f['team_h_name']} vs {f['team_a_name']}")
-                    sofa_events = get_today_sofascore_matches()
                     home_sofa = TEAM_NAME_MAP.get(f['team_h_name'], f['team_h_name'])
                     away_sofa = TEAM_NAME_MAP.get(f['team_a_name'], f['team_a_name'])
                     target_event = next((e for e in sofa_events 
@@ -578,6 +571,7 @@ def run_monitor():
                     msg_parts = [f"📢 *Lineups Out: {f['team_h_name']} vs {f['team_a_name']}*"]
                     
                     if target_event:
+                        logging.info(f"Matched {f['team_h_name']} vs {f['team_a_name']} to Sofa ID {target_event['id']}")
                         sofa_lineup = fetch_sofascore_lineup(target_event['id'])
                         if sofa_lineup:
                             db.tactical_data.update_one(
@@ -799,3 +793,4 @@ if __name__ == "__main__":
     
     logging.info("Starting PL Lineup Bot...")
     application.run_polling()
+``` 61
