@@ -30,6 +30,15 @@ SOFASCORE_HEADERS = {
     "Origin": "https://www.sofascore.com"
 }
 
+TEAM_NAME_MAP = {
+    "Man City": "Manchester City",
+    "Man Utd": "Manchester United",
+    "Newcastle": "Newcastle United",
+    "Spurs": "Tottenham",
+    "Nott’m Forest": "Nottingham Forest",
+    "Wolves": "Wolverhampton Wanderers",
+}
+
 # --- MONGO HELPER ---
 def get_db():
     client = MongoClient(MONGODB_URI)
@@ -47,7 +56,7 @@ def save_standings_to_mongo(db, rows):
             "team_id": team["id"],
             "team_name": team["name"],
             "position": row["position"],
-            "played": row["matches"],
+            "played": row["played"],
             "wins": row["wins"],
             "draws": row["draws"],
             "losses": row["losses"],
@@ -62,8 +71,8 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.utcnow(),  # FIXED: Added comma
-            "ppda_avg": row.get("ppda_avg", 20.0),  # FIXED: Added comma
+            "updated_at": datetime.utcnow(),
+            "ppda_avg": row.get("ppda_avg", 20.0),
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
         }
@@ -305,8 +314,11 @@ def evaluate_team_result(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         if not home_data or not away_data:
             return "Skip (no data)"
@@ -337,8 +349,11 @@ def evaluate_btts(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         if not home_data or not away_data:
             return "Skip (no xG data)"
@@ -374,8 +389,11 @@ def generate_fixture_bet_builder(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         result = evaluate_team_result(fixture, db)
         builder.append(f"• Result: {result}")
@@ -413,6 +431,10 @@ def generate_gw_accumulator(db, top_n=6):
             'event': {'$ne': None}
         }).sort('kickoff_time', 1))
         
+        if upcoming:
+            next_event = min(f['event'] for f in upcoming if f['event'] is not None)
+            upcoming = [f for f in upcoming if f['event'] == next_event]
+        
         accumulator = []
         
         for f in upcoming:
@@ -422,8 +444,11 @@ def generate_gw_accumulator(db, top_n=6):
                 home_id = f['team_h']
                 away_id = f['team_a']
                 
-                home_stand = db.standings.find_one({"team_name": home_name})
-                away_stand = db.standings.find_one({"team_name": away_name})
+                home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+                away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+                
+                home_stand = db.standings.find_one({"team_name": home_ustat})
+                away_stand = db.standings.find_one({"team_name": away_ustat})
                 
                 if not home_stand or not away_stand:
                     continue
