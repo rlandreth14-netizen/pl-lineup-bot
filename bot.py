@@ -34,9 +34,18 @@ TEAM_NAME_MAP = {
     "Man City": "Manchester City",
     "Man Utd": "Manchester United",
     "Newcastle": "Newcastle United",
-    "Spurs": "Tottenham",
-    "Nott’m Forest": "Nottingham Forest",
-    "Wolves": "Wolverhampton Wanderers",
+    "Spurs": "Tottenham Hotspur",
+    "Nott'm Forest": "Nottingham Forest",
+    "Wolves": "Wolverhampton",
+    "Brighton": "Brighton & Hove Albion",
+    "West Ham": "West Ham United",
+    "Leicester": "Leicester City",
+    "Ipswich": "Ipswich Town",
+    "Leeds": "Leeds United",
+    "Southampton": "Southampton",
+    "Burnley": "Burnley",
+    "Sunderland": "Sunderland",
+    # Add more if needed for other teams
 }
 
 # --- MONGO HELPER ---
@@ -71,7 +80,7 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.utcnow(),
+            "updated_at": datetime.now(timezone.utc),
             "ppda_avg": row.get("ppda_avg", 20.0),
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
@@ -557,9 +566,14 @@ def run_monitor():
                 if 59 <= diff_mins <= 61:
                     logging.info(f"Checking: {f['team_h_name']} vs {f['team_a_name']}")
                     sofa_events = get_today_sofascore_matches()
+                    home_sofa = TEAM_NAME_MAP.get(f['team_h_name'], f['team_h_name'])
+                    away_sofa = TEAM_NAME_MAP.get(f['team_a_name'], f['team_a_name'])
                     target_event = next((e for e in sofa_events 
-                                       if f['team_h_name'] in e.get('homeTeam', {}).get('name', '') 
-                                       or f['team_a_name'] in e.get('awayTeam', {}).get('name', '')), None)
+                                        if home_sofa == e.get('homeTeam', {}).get('name', '') 
+                                        and away_sofa == e.get('awayTeam', {}).get('name', '')), None)
+                    
+                    if target_event is None:
+                        logging.warning(f"No matching SofaScore event for {f['team_h_name']} vs {f['team_a_name']}")
                     
                     msg_parts = [f"📢 *Lineups Out: {f['team_h_name']} vs {f['team_a_name']}*"]
                     
