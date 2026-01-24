@@ -721,7 +721,10 @@ async def builder(update: Update, context: CallbackContext):
 async def gw_accumulator(update: Update, context: CallbackContext):
     client, db = get_db()
     msg = generate_gw_accumulator(db)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if msg and msg.strip():  # Check if not empty
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("No accumulator data available — try /update first.")
     client.close()
 
 async def status(update: Update, context: CallbackContext):
