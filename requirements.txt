@@ -5,4 +5,3 @@ pymongo
 python-telegram-bot
 understatapi
 flask
-playwright
