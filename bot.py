@@ -20,14 +20,19 @@ logging.basicConfig(level=logging.INFO)
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
 HIGH_OWNERSHIP_THRESHOLD = 16.0
-SOFASCORE_BASE_URL = "https://api.sofascore.com/api/v1"
-PL_TOURNAMENT_ID = 17
-PL_SEASON_ID = 76986
+SOFASCORE_BASE_URL = "https://www.sofascore.com"
+PL_SLUG = "football/england/premier-league"
 
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.sofascore.com/",
-    "Origin": "https://www.sofascore.com"
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 TEAM_NAME_MAP = {
@@ -79,43 +84,53 @@ def save_standings_to_mongo(db, rows):
         collection.insert_one(doc)
 
 # --- SOFASCORE FUNCTIONS ---
-def fetch_sofascore_lineup(match_id, retries=2):
-    url = f"{SOFASCORE_BASE_URL}/event/{match_id}/lineups"
+def fetch_sofascore_lineup(match_url, retries=2):
     for attempt in range(retries):
         try:
-            res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+            res = requests.get(match_url, headers=SOFASCORE_HEADERS, timeout=10)
             if res.status_code != 200:
                 logging.warning(f"SofaScore returned {res.status_code}")
                 time.sleep(2)
                 continue
-            data = res.json()
+            soup = BeautifulSoup(res.text, 'html.parser')
             players = []
-            for side in ['home', 'away']:
-                team_data = data.get(side)
-                if not team_data: continue
-                team_name = team_data['team']['name']
-                for entry in team_data.get('players', []):
-                    p = entry.get('player')
-                    if not p: continue
+            # Scrape lineup sections - adjust selectors based on page structure
+            lineup_sections = soup.find_all('div', class_='lineup-section')  # Example selector; inspect page for accurate class
+            for section in lineup_sections:
+                team_name = section.find('div', class_='team-name').text.strip() if section.find('div', class_='team-name') else 'Unknown'
+                for player_div in section.find_all('div', class_='player'):
+                    name = player_div.find('span', class_='player-name').text.strip() if player_div.find('span', class_='player-name') else 'Unknown'
+                    pos = player_div.find('span', class_='player-position').text.strip() if player_div.find('span', class_='player-position') else 'Unknown'
                     players.append({
-                        "name": p.get('name', 'Unknown'),
-                        "sofa_id": p.get('id'),
-                        "tactical_pos": entry.get('position', 'Unknown'),
+                        "name": name,
+                        "tactical_pos": pos,
                         "team": team_name
                     })
             return players
         except Exception as e:
-            logging.error(f"SofaScore error (attempt {attempt+1}): {e}")
+            logging.error(f"SofaScore scrape error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return None
 
 def get_today_sofascore_matches():
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
+    url = f"{SOFASCORE_BASE_URL}/{PL_SLUG}"
     try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
-        return [e for e in res.get('events', []) 
-                if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+        logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
+        soup = BeautifulSoup(res.text, 'html.parser')
+        events = []
+        # Scrape today's matches - adjust selectors
+        match_cards = soup.find_all('div', class_='match-card')  # Example selector
+        for card in match_cards:
+            home_team = card.find('div', class_='home-team').text.strip() if card.find('div', class_='home-team') else ''
+            away_team = card.find('div', class_='away-team').text.strip() if card.find('div', class_='away-team') else ''
+            match_id = card.get('data-id') or card.find('a', class_='match-link').get('href').split('/')[-1] if card.find('a', class_='match-link') else None
+            events.append({
+                'homeTeam': {'name': home_team},
+                'awayTeam': {'name': away_team},
+                'id': match_id
+            })
+        return events
     except Exception as e:
         logging.error(f"Error fetching matches: {e}")
         return []
