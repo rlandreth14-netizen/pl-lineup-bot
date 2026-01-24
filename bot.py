@@ -6,7 +6,6 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 import json
-import base64
 from datetime import datetime, timezone
 from flask import Flask
 from pymongo import MongoClient
@@ -20,18 +19,13 @@ logging.basicConfig(level=logging.INFO)
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
 HIGH_OWNERSHIP_THRESHOLD = 16.0
-SOFASCORE_BASE_URL = "https://www.sofascore.com/api/v1"
-PL_TOURNAMENT_ID = 17
-PL_SEASON_ID = 76986
 
-SOFASCORE_HEADERS = {
+PL_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.sofascore.com/tournament/football/england/premier-league/17",
-    "Accept": "application/json",
+    "Referer": "https://www.premierleague.com/fixtures",
+    "Accept": "text/html",
     "Cache-Control": "no-cache",
-    "Origin": "https://www.sofascore.com",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin"
+    "Origin": "https://www.premierleague.com",
 }
 
 # --- MONGO HELPER ---
@@ -66,54 +60,87 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.utcnow(),  # FIXED: Added comma
-            "ppda_avg": row.get("ppda_avg", 20.0),  # FIXED: Added comma
+            "updated_at": datetime.utcnow(),
+            "ppda_avg": row.get("ppda_avg", 20.0),
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
         }
         collection.insert_one(doc)
 
-def fetch_pl_lineup(match_id, retries=2):
-    """Fetch lineups from official Premier League website (replace SofaScore)"""
-    url = f"https://www.premierleague.com/en/match/{match_id}/lineups"  # Assuming match_id is FPL ID; adjust if needed
+def get_pl_match_id(fixture, retries=2):
+    """Map FPL fixture to PL match ID by scraping fixtures page."""
+    home = fixture['team_h_name']
+    away = fixture['team_a_name']
+    ko_time = fixture.get('kickoff_time')
+    if not ko_time:
+        return None
+    date_str = datetime.fromisoformat(ko_time.replace('Z', '+00:00')).strftime('%d %b %Y')
+    url = "https://www.premierleague.com/fixtures"
     for attempt in range(retries):
         try:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, headers=PL_HEADERS, timeout=10)
+            if res.status_code != 200:
+                logging.warning(f"PL fixtures returned {res.status_code}")
+                time.sleep(2)
+                continue
+            soup = BeautifulSoup(res.text, 'html.parser')
+            match_containers = soup.find_all('a', class_='matchFixtureContainer')
+            for m in match_containers:
+                h_team = m.find('span', class_='teamName').find('abbr')['title'].strip()
+                a_team = m.find('span', class_='teamName').find('abbr', recursive=False)['title'].strip()  # Second teamName
+                m_date = m.find('time')['datetime']  # ISO date
+                if h_team == home and a_team == away and date_str in m_date:
+                    pl_id = m['data-comp-match-item']
+                    return pl_id
+        except Exception as e:
+            logging.error(f"PL match ID error (attempt {attempt+1}): {e}")
+            time.sleep(2)
+    return None
+
+def fetch_pl_lineup(pl_match_id, retries=2):
+    """Fetch lineups from official Premier League website."""
+    url = f"https://www.premierleague.com/match/{pl_match_id}"
+    for attempt in range(retries):
+        try:
+            res = requests.get(url, headers=PL_HEADERS, timeout=10)
             if res.status_code != 200:
                 logging.warning(f"PL lineup returned {res.status_code}")
                 time.sleep(2)
                 continue
             
             soup = BeautifulSoup(res.text, 'html.parser')
-            
             players = []
             
-            # Find starting XI and subs sections (PL uses class 'lineup' or 'team-lineup')
-            lineup_sections = soup.find_all('div', class_='team-lineup')  # Adjust class based on page (inspect element)
-            for section in lineup_sections:
-                team_name = section.find('h3').text.strip() if section.find('h3') else 'Unknown'
+            team_containers = soup.find_all('div', class_='matchLineupTeamContainer')
+            for team in team_containers:
+                team_name = team.find('div', class_='teamName').text.strip()
                 
                 # Starting XI
-                starting = section.find('div', class_='starting-lineup')
-                for player in starting.find_all('div', class_='player'):
-                    name = player.find('span', class_='player-name').text.strip()
-                    pos = player.find('span', class_='player-position').text.strip()
-                    players.append({
-                        "name": name,
-                        "tactical_pos": pos,
-                        "team": team_name
-                    })
+                starting_list = team.find('ul', class_='playerList')
+                if starting_list:
+                    for li in starting_list.find_all('li', class_='player'):
+                        name = li.find('span', class_='name').text.strip()
+                        # Positions not explicitly text-based; use 'Unknown' or infer if needed
+                        pos = 'Unknown'
+                        players.append({
+                            "name": name,
+                            "tactical_pos": pos,
+                            "team": team_name,
+                            "starting": True
+                        })
                 
                 # Substitutes
-                subs = section.find('div', class_='substitutes')
-                for player in subs.find_all('div', class_='player'):
-                    name = player.find('span', class_='player-name').text.strip()
-                    pos = player.find('span', class_='player-position').text.strip()
-                    players.append({
-                        "name": name,
-                        "tactical_pos": pos,
-                        "team": team_name  # Mark as sub if needed
-                    })
+                subs_list = team.find('div', class_='substitutesContainer').find('ul')
+                if subs_list:
+                    for li in subs_list.find_all('li', class_='player'):
+                        name = li.find('span', class_='name').text.strip()
+                        pos = 'Unknown'
+                        players.append({
+                            "name": name,
+                            "tactical_pos": pos,
+                            "team": team_name,
+                            "starting": False
+                        })
             
             return players
         except Exception as e:
@@ -121,26 +148,30 @@ def fetch_pl_lineup(match_id, retries=2):
             time.sleep(2)
     return None
 
-def get_today_sofascore_matches():
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
-    try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
-        return [e for e in res.get('events', []) 
-                if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
-    except Exception as e:
-        logging.error(f"Error fetching matches: {e}")
-        return []
-
 # --- ANALYSIS FUNCTIONS ---
 def detect_high_ownership_benched(match_id, db):
     try:
-        lineups = list(db.lineups.find({'match_id': int(match_id)}))
-        if not lineups: return None
-        started_ids = {l['player_id'] for l in lineups if l.get('minutes', 0) > 0}
-        players = list(db.players.find({'selected_by_percent': {'$gte': HIGH_OWNERSHIP_THRESHOLD}}))
-        alerts = [f"🚨 {p['web_name']} — NOT STARTING" for p in players if p['id'] not in started_ids]
-        return "\n".join(alerts) if alerts else None
+        fixture = db.fixtures.find_one({'id': int(match_id)})
+        if not fixture or 'pl_id' not in fixture:
+            return None
+        tactical = db.tactical_data.find_one({'match_id': match_id})
+        if not tactical:
+            return None
+        players = tactical.get('players', [])
+        benched = []
+        team_h_id = fixture['team_h']
+        team_a_id = fixture['team_a']
+        for p in players:
+            if p.get('starting', True):
+                continue
+            fpl_p = db.players.find_one({
+                "web_name": {"$regex": f"^{p['name']}$", "$options": "i"},
+                "team": {"$in": [team_h_id, team_a_id]},
+                "selected_by_percent": {"$gte": HIGH_OWNERSHIP_THRESHOLD}
+            })
+            if fpl_p:
+                benched.append(f"🚨 {fpl_p['web_name']} — BENCHED")
+        return "\n".join(benched) if benched else None
     except Exception as e:
         logging.error(f"Benched check error: {e}")
         return None
@@ -152,19 +183,19 @@ def detect_tactical_oop(db, match_id_filter=None):
         if not latest: return None
         insights = []
         
-        for p_sofa in latest.get('players', []):
-            fpl_p = db.players.find_one({"web_name": {"$regex": f"^{p_sofa['name']}$", "$options": "i"}})
+        for p in latest.get('players', []):
+            fpl_p = db.players.find_one({"web_name": {"$regex": f"^{p['name']}$", "$options": "i"}})
             if fpl_p:
-                sofa_pos = p_sofa.get('tactical_pos', 'Unknown')
+                sofa_pos = p.get('tactical_pos', 'Unknown')
                 fpl_pos = fpl_p.get('position')
                 
                 is_oop = False
-                if fpl_pos == 'DEF' and sofa_pos not in ['DEF', 'GK']: is_oop = True
+                if fpl_pos == 'DEF' and sofa_pos not in ['DEF', 'GK', 'Unknown']: is_oop = True
                 elif fpl_pos == 'MID' and sofa_pos == 'FWD': is_oop = True
                 elif fpl_pos == 'FWD' and sofa_pos in ['MID', 'DEF']: is_oop = True
                 
                 if is_oop:
-                    insights.append(f"🔥 {p_sofa['name']} ({p_sofa['team']}): {fpl_pos} ➡️ {sofa_pos}")
+                    insights.append(f"🔥 {p['name']} ({p['team']}): {fpl_pos} ➡️ {sofa_pos}")
         return "\n".join(insights) if insights else None
     except Exception as e:
         logging.error(f"OOP detection error: {e}")
@@ -321,7 +352,6 @@ def fetch_pl_standings():
 
 # --- BET BUILDER FUNCTIONS ---
 def evaluate_team_result(fixture, db):
-    """ADDED: Missing function to evaluate match result"""
     try:
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
@@ -335,10 +365,9 @@ def evaluate_team_result(fixture, db):
         home_played = home_data.get('played', 1)
         away_played = away_data.get('played', 1)
         
-        home_xg_pg = home_data.get('xG', 1.0) / max(home_played, 1)
-        away_xg_pg = away_data.get('xG', 1.0) / max(away_played, 1)
+        home_xg_pg = home_data.get('home_xG_pg', 1.0)
+        away_xg_pg = away_data.get('away_xG_pg', 1.0)
         
-        # Add home advantage
         home_xg_expected = home_xg_pg + 0.3
         away_xg_expected = away_xg_pg
         
@@ -381,15 +410,14 @@ def evaluate_btts(fixture, db):
 
 def select_shot_player(team_name, lineup, db):
     for p in lineup:
-        if p['team'] == team_name:
+        if p['team'] == team_name and p.get('starting', False):
             fpl_p = db.players.find_one({"web_name": {"$regex": f"^{p['name']}$", "$options": "i"}})
             if fpl_p and fpl_p.get('position') in ['FWD', 'MID'] and fpl_p.get('minutes', 0) > 0:
-                if p.get('tactical_pos') in ['FWD', 'MID']:
+                if p.get('tactical_pos') in ['FWD', 'MID', 'Unknown']:
                     return p['name']
     return None
 
 def generate_fixture_bet_builder(fixture, db):
-    """FIXED: Removed duplicate, kept enhanced version"""
     try:
         builder = []
         home_name = fixture['team_h_name']
@@ -411,9 +439,9 @@ def generate_fixture_bet_builder(fixture, db):
                 f"({away_data['xGD']:+.2f})"
             )
         
-        sofa_data = db.tactical_data.find_one({"match_id": fixture.get('sofascore_id')})
-        if sofa_data:
-            lineup = sofa_data.get('players', [])
+        tactical_data = db.tactical_data.find_one({"match_id": fixture['id']})
+        if tactical_data:
+            lineup = tactical_data.get('players', [])
             if home_player := select_shot_player(home_name, lineup, db):
                 builder.append(f"• {home_player} 1+ SOT")
             if away_player := select_shot_player(away_name, lineup, db):
@@ -426,7 +454,6 @@ def generate_fixture_bet_builder(fixture, db):
 
 # --- GAMEWEEK ACCUMULATOR ---
 def generate_gw_accumulator(db, top_n=6):
-    """Generate strongest win bets using real xG, xGA, form (home/away), H2H, table."""
     try:
         upcoming_all = list(db.fixtures.find({
             'started': False,
@@ -458,14 +485,12 @@ def generate_gw_accumulator(db, top_n=6):
                 home_played = home_stand.get('played', 1)
                 away_played = away_stand.get('played', 1)
 
-                # Prefer recent xG/xGA
-                home_xg_pg = home_stand.get('xG_recent', home_stand.get('xG', 1.0)) / min(6, home_played)
-                away_xg_pg = away_stand.get('xG_recent', away_stand.get('xG', 1.0)) / min(6, away_played)
-                home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / min(6, home_played)
-                away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / min(6, away_played)
+                home_xg_pg = home_stand.get('xG_recent', home_stand.get('xG', 1.0)) / max(1, min(6, home_played))
+                away_xg_pg = away_stand.get('xG_recent', away_stand.get('xG', 1.0)) / max(1, min(6, away_played))
+                home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / max(1, min(6, home_played))
+                away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / max(1, min(6, away_played))
 
-                # Home boost + defensive penalty
-                home_xg_expected = home_xg_pg + 0.55  # Increased to reduce negative diff
+                home_xg_expected = home_xg_pg + 0.55
                 away_xg_expected = away_xg_pg
 
                 home_xg_expected *= (1 - (away_xga_pg / 2.0))
@@ -473,19 +498,16 @@ def generate_gw_accumulator(db, top_n=6):
 
                 xg_diff = home_xg_expected - away_xg_expected
                 if xg_diff < 0:
-                    xg_diff += 0.2  # Small home bias for favourites
+                    xg_diff += 0.2
 
-                # Recent xPTS diff
-                home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / min(6, home_played)
-                away_xpts_pg = away_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / min(6, home_played)
+                home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / max(1, min(6, home_played))
+                away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / max(1, min(6, away_played))
                 xpts_diff = home_xpts_pg - away_xpts_pg
 
-                # PPDA bonus
                 home_ppda = home_stand.get('ppda_avg', 20.0)
                 away_ppda = away_stand.get('ppda_avg', 20.0)
                 ppda_bonus = (away_ppda - home_ppda) * 0.05
 
-                # Home/away specific form
                 home_form = get_home_form(home_id, db, last_n=6)
                 away_form = get_away_form(away_id, db, last_n=6)
                 form_diff = home_form - away_form
@@ -505,7 +527,6 @@ def generate_gw_accumulator(db, top_n=6):
                     ppda_bonus
                 )
 
-                # Confidence & stars
                 if final_strength >= 0.50:
                     confidence = "High"
                     stars = "⭐⭐⭐"
@@ -532,7 +553,6 @@ def generate_gw_accumulator(db, top_n=6):
                 logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
                 continue
 
-        # Enforce minimum 5 picks
         if len(accumulator) < 5 and upcoming:
             logging.info(f"Only {len(accumulator)} strong bets — forcing top {min(6, len(upcoming))} fallback win picks")
             remaining_needed = 5 - len(accumulator)
@@ -553,7 +573,7 @@ def generate_gw_accumulator(db, top_n=6):
 
         msg = "🔥 *Gameweek Accumulator – Strongest Win Bets*\n\n"
         for item in accumulator[:top_n]:
-            msg += f"{item['stars']} **{item['match']}**: {item['pick']}**\n"
+            msg += f"{item['stars']} **{item['match']}: {item['pick']}**\n"
             msg += f"   {item['details']}\n\n"
 
         return msg
@@ -584,29 +604,29 @@ def run_monitor():
                 
                 if 59 <= diff_mins <= 61:
                     logging.info(f"Checking: {f['team_h_name']} vs {f['team_a_name']}")
-                    sofa_events = get_today_sofascore_matches()
-                    target_event = next((e for e in sofa_events 
-                                       if f['team_h_name'] in e.get('homeTeam', {}).get('name', '') 
-                                       or f['team_a_name'] in e.get('awayTeam', {}).get('name', '')), None)
+                    pl_id = f.get('pl_id')
+                    if not pl_id:
+                        pl_id = get_pl_match_id(f)
+                        if pl_id:
+                            db.fixtures.update_one({'id': f['id']}, {'$set': {'pl_id': pl_id}})
                     
                     msg_parts = [f"📢 *Lineups Out: {f['team_h_name']} vs {f['team_a_name']}*"]
                     
-                    if target_event:
-                        sofa_lineup = fetch_sofascore_lineup(target_event['id'])
-                        if sofa_lineup:
+                    if pl_id:
+                        lineup = fetch_pl_lineup(pl_id)
+                        if lineup:
                             db.tactical_data.update_one(
-                                {"match_id": target_event['id']},
+                                {"match_id": f['id']},
                                 {"$set": {
-                                    "home_team": target_event['homeTeam']['name'],
-                                    "away_team": target_event['awayTeam']['name'],
-                                    "players": sofa_lineup,
+                                    "home_team": f['team_h_name'],
+                                    "away_team": f['team_a_name'],
+                                    "players": lineup,
                                     "last_updated": datetime.now(timezone.utc)
                                 }},
                                 upsert=True
                             )
-                            db.fixtures.update_one({'id': f['id']}, {'$set': {'sofascore_id': target_event['id']}})
                             
-                            if oop := detect_tactical_oop(db, target_event['id']):
+                            if oop := detect_tactical_oop(db, f['id']):
                                 msg_parts.append(f"\n*Tactical Shifts:*\n{oop}")
                     
                     if benched := detect_high_ownership_benched(f['id'], db):
@@ -699,20 +719,25 @@ async def update_data(update: Update, context: CallbackContext):
         if lineup_entries:
             db.lineups.insert_many(lineup_entries)
         
-        today_events = get_today_sofascore_matches()
-        for event in today_events:
-            sofa_lineup = fetch_sofascore_lineup(event['id'])
-            if sofa_lineup:
-                db.tactical_data.update_one(
-                    {"match_id": event['id']},
-                    {"$set": {
-                        "home_team": event['homeTeam']['name'],
-                        "away_team": event['awayTeam']['name'],
-                        "players": sofa_lineup,
-                        "last_updated": datetime.now(timezone.utc)
-                    }},
-                    upsert=True
-                )
+        # Fetch PL lineups for today's/upcoming matches
+        now = datetime.now(timezone.utc)
+        today_fixtures = [f for f in fixtures if f['kickoff_time'] and datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00')) > now - timedelta(days=1)]
+        for event in today_fixtures:
+            pl_id = get_pl_match_id(event)
+            if pl_id:
+                db.fixtures.update_one({'id': event['id']}, {'$set': {'pl_id': pl_id}})
+                lineup = fetch_pl_lineup(pl_id)
+                if lineup:
+                    db.tactical_data.update_one(
+                        {"match_id": event['id']},
+                        {"$set": {
+                            "home_team": event['team_h_name'],
+                            "away_team": event['team_a_name'],
+                            "players": lineup,
+                            "last_updated": datetime.now(timezone.utc)
+                        }},
+                        upsert=True
+                    )
         
         await update.message.reply_text("✅ Sync complete!")
     except Exception as e:
