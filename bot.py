@@ -405,115 +405,140 @@ def generate_fixture_bet_builder(fixture, db):
 
 # --- GAMEWEEK ACCUMULATOR ---
 def generate_gw_accumulator(db, top_n=6):
-    """Generate top win bets using xG, form, H2H"""
+    """Generate strongest win bets using real xG, xGA, form, H2H, table."""
     try:
+        # Get all upcoming fixtures
         upcoming_all = list(db.fixtures.find({
-    'started': False,
-    'finished': False,
-    'event': {'$ne': None}
-}).sort('kickoff_time', 1))
+            'started': False,
+            'finished': False,
+            'event': {'$ne': None}
+        }).sort('kickoff_time', 1))
 
-if upcoming_all:
-    current_gw = min(f['event'] for f in upcoming_all)
-    upcoming = [f for f in upcoming_all if f['event'] == current_gw]
-else:
-    upcoming = []
-      
+        # Filter for current GW only
+        if upcoming_all:
+            current_gw = min(f['event'] for f in upcoming_all)
+            upcoming = [f for f in upcoming_all if f['event'] == current_gw]
+        else:
+            upcoming = []
+
         accumulator = []
-        
+
         for f in upcoming:
             try:
                 home_name = f['team_h_name']
                 away_name = f['team_a_name']
                 home_id = f['team_h']
                 away_id = f['team_a']
-                
+
                 home_stand = db.standings.find_one({"team_name": home_name})
                 away_stand = db.standings.find_one({"team_name": away_name})
-                
+
                 if not home_stand or not away_stand:
                     continue
-                
+
                 home_played = home_stand.get('played', 1)
                 away_played = away_stand.get('played', 1)
-                
+
+                # Prefer recent xG/xGA for prediction
                 home_xg_pg = home_stand.get('xG_recent', home_stand.get('xG', 1.0)) / min(6, home_played)
                 away_xg_pg = away_stand.get('xG_recent', away_stand.get('xG', 1.0)) / min(6, away_played)
                 home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / min(6, home_played)
                 away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / min(6, away_played)
-                
-                home_xg_pg = home_stand.get('home_xG_pg', home_xg_pg)
-                away_xg_pg = away_stand.get('away_xG_pg', away_xg_pg)
-                
-                home_xg_expected = (home_xg_pg + 0.45) * (1 - (away_xga_pg / 2.0))
-                away_xg_expected = away_xg_pg * (1 - (home_xga_pg / 2.0))
+
+                # Use home/away split for expected (more accurate)
+                home_xg_expected = home_stand.get('home_xG_pg', home_xg_pg) + 0.45
+                away_xg_expected = away_stand.get('away_xG_pg', away_xg_pg)
+
+                home_xg_expected *= (1 - (away_xga_pg / 2.0))
+                away_xg_expected *= (1 - (home_xga_pg / 2.0))
+
                 xg_diff = home_xg_expected - away_xg_expected
-                
+
+                # Add recent xPTS per game diff
                 home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / min(6, home_played)
                 away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / min(6, away_played)
                 xpts_diff = home_xpts_pg - away_xpts_pg
-                
+
+                # PPDA & deep as bonus factors
                 home_ppda = home_stand.get('ppda_avg', 20.0)
                 away_ppda = away_stand.get('ppda_avg', 20.0)
-                ppda_bonus = (away_ppda - home_ppda) * 0.05
-                
-                home_form = get_home_form(home_id, db)
-                away_form = get_away_form(away_id, db)
+                ppda_bonus = (away_ppda - home_ppda) * 0.02
+
+                home_form = get_team_form(home_id, db, last_n=6)
+                away_form = get_team_form(away_id, db, last_n=6)
                 form_diff = home_form - away_form
-                
+
                 home_pos = home_stand.get('position', 10)
                 away_pos = away_stand.get('position', 10)
                 table_diff = away_pos - home_pos
-                
-                h2h = get_h2h_edge(home_id, away_id, db)
-                
+
+                h2h = get_h2h_edge(home_id, away_id, db, last_n=5)
+
                 final_strength = (
-                    xg_diff * 1.5 +
-                    xpts_diff * 1.0 +
-                    form_diff * 0.7 +
-                    table_diff * 0.5 +
-                    h2h * 0.8 +
+                    xg_diff * 1.3 +
+                    xpts_diff * 0.8 +
+                    form_diff * 0.5 +
+                    table_diff * 0.3 +
+                    h2h * 0.6 +
                     ppda_bonus
                 )
-                
-                if final_strength >= 0.45:
+
+                # Confidence & stars - pure win picks only
+                if final_strength >= 0.50:
+                    confidence = "High"
                     stars = "⭐⭐⭐"
-                elif final_strength >= 0.20:
+                elif final_strength >= 0.25:
+                    confidence = "Medium"
                     stars = "⭐⭐"
-                elif final_strength >= 0.05:
+                elif final_strength >= 0.08:  # Lowered threshold to capture more
+                    confidence = "Low"
                     stars = "⭐"
                 else:
                     continue
-                
+
                 pick = f"{home_name} to Win" if final_strength > 0 else f"{away_name} to Win"
-                
+
                 accumulator.append({
                     'strength': abs(final_strength),
                     'match': f"{home_name} vs {away_name}",
                     'pick': pick,
                     'stars': stars,
-                    'details': f"xG diff: {xg_diff:.2f} | xPTS: {xpts_diff:.2f} | Form: {form_diff} | H2H: {h2h:.1f}"
+                    'details': f"xG diff: {xg_diff:.2f} | xPTS diff: {xpts_diff:.2f} | Form diff: {form_diff} | Table diff: {table_diff} | H2H: {h2h:.1f}"
                 })
-            
+
             except Exception as e:
-                logging.error(f"Accumulator error: {e}")
+                logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
                 continue
-        
+
+        # Enforce minimum 5 picks: if fewer qualified, force top 5+ fallback win picks
+        if len(accumulator) < 5 and upcoming:
+            logging.info(f"Only {len(accumulator)} strong bets — forcing top {min(6, len(upcoming))} fallback win picks")
+            remaining_needed = 5 - len(accumulator)
+            fallback_matches = upcoming[len(accumulator): len(accumulator) + remaining_needed + 2]
+            for f in fallback_matches:
+                accumulator.append({
+                    'strength': 0.05,
+                    'match': f"{f['team_h_name']} vs {f['team_a_name']}",
+                    'pick': f"{f['team_h_name']} to Win",
+                    'stars': "⭐",
+                    'details': "Fallback win pick (weak edge)"
+                })
+
         accumulator.sort(key=lambda x: x['strength'], reverse=True)
-        
+
         if not accumulator:
-            return "No upcoming matches or insufficient data."
-        
-        msg = "🔥 *Gameweek Accumulator*\n\n"
+            return "No upcoming matches or insufficient data this gameweek."
+
+        msg = "🔥 *Gameweek Accumulator – Strongest Win Bets*\n\n"
         for item in accumulator[:top_n]:
             msg += f"{item['stars']} **{item['match']}**: {item['pick']}**\n"
             msg += f"   {item['details']}\n\n"
-        
+
         return msg
-    
+
     except Exception as e:
-        logging.error(f"Accumulator error: {e}")
-        return "Error generating accumulator."
+        logging.error(f"Generate accumulator error: {e}")
+        return "Error generating accumulator — check logs."
 
 def show_fixture_menu(db):
     fixtures = get_next_fixtures(db, limit=10)
