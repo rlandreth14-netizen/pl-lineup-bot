@@ -407,12 +407,18 @@ def generate_fixture_bet_builder(fixture, db):
 def generate_gw_accumulator(db, top_n=6):
     """Generate top win bets using xG, form, H2H"""
     try:
-        upcoming = list(db.fixtures.find({
-            'started': False,
-            'finished': False,
-            'event': {'$ne': None}
-        }).sort('kickoff_time', 1))
-        
+        upcoming_all = list(db.fixtures.find({
+    'started': False,
+    'finished': False,
+    'event': {'$ne': None}
+}).sort('kickoff_time', 1))
+
+if upcoming_all:
+    current_gw = min(f['event'] for f in upcoming_all)
+    upcoming = [f for f in upcoming_all if f['event'] == current_gw]
+else:
+    upcoming = []
+      
         accumulator = []
         
         for f in upcoming:
