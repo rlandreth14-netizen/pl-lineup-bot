@@ -1,8 +1,8 @@
 requests
+beautifulsoup4
 pandas
 pymongo
 python-telegram-bot
-flask
-beautifulsoup4
 understatapi
+flask
 playwright
