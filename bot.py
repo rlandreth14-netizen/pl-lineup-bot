@@ -354,10 +354,10 @@ def generate_fixture_bet_builder(fixture, db):
         return "Could not generate builder."
 
 # --- GAMEWEEK ACCUMULATOR ---
-def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
-    """Generate strongest win bets for the current gameweek using real xG, xGA, form, H2H, table."""
+def generate_gw_accumulator(db, top_n=6):  # Show up to 6, enforce min 4
+    """Generate strongest win bets using real xG, xGA, form, H2H, table position."""
     try:
-        # Get upcoming fixtures in the current/next gameweek
+        # Get upcoming fixtures in current/next gameweek
         upcoming = list(db.fixtures.find({
             'started': False,
             'finished': False,
@@ -382,31 +382,33 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                 home_played = home_stand.get('played', 1)
                 away_played = away_stand.get('played', 1)
 
-                # Prefer recent xG/xGA for prediction
+                # Prefer recent xG/xGA (fallback to season)
                 home_xg_pg = home_stand.get('xG_recent', home_stand.get('xG', 1.0)) / min(6, home_played)
                 away_xg_pg = away_stand.get('xG_recent', away_stand.get('xG', 1.0)) / min(6, away_played)
                 home_xga_pg = home_stand.get('xGA_recent', home_stand.get('xGA', 1.5)) / min(6, home_played)
                 away_xga_pg = away_stand.get('xGA_recent', away_stand.get('xGA', 1.5)) / min(6, away_played)
 
-                # Use home/away split for expected (more accurate)
+                # Home/away split if available
                 home_xg_expected = home_stand.get('home_xG_pg', home_xg_pg) + 0.45
                 away_xg_expected = away_stand.get('away_xG_pg', away_xg_pg)
 
+                # Defensive penalty
                 home_xg_expected *= (1 - (away_xga_pg / 2.0))
                 away_xg_expected *= (1 - (home_xga_pg / 2.0))
 
                 xg_diff = home_xg_expected - away_xg_expected
 
-                # Add recent xPTS per game diff
+                # Recent xPTS per game diff
                 home_xpts_pg = home_stand.get('xPTS_recent', home_stand.get('xPTS', 0)) / min(6, home_played)
                 away_xpts_pg = away_stand.get('xPTS_recent', away_stand.get('xPTS', 0)) / min(6, away_played)
                 xpts_diff = home_xpts_pg - away_xpts_pg
 
-                # PPDA & deep as bonus factors
+                # PPDA bonus (lower PPDA = better press)
                 home_ppda = home_stand.get('ppda_avg', 20.0)
                 away_ppda = away_stand.get('ppda_avg', 20.0)
-                ppda_bonus = (away_ppda - home_ppda) * 0.02  # lower PPDA (better press) = small bonus
+                ppda_bonus = (away_ppda - home_ppda) * 0.05
 
+                # Form (overall for now — can split to home/away later)
                 home_form = get_team_form(home_id, db, last_n=6)
                 away_form = get_team_form(away_id, db, last_n=6)
                 form_diff = home_form - away_form
@@ -418,22 +420,25 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                 h2h = get_h2h_edge(home_id, away_id, db, last_n=5)
 
                 final_strength = (
-                    xg_diff * 1.3 +
-                    xpts_diff * 0.8 +     # unlucky teams due results
-                    form_diff * 0.5 +
-                    table_diff * 0.3 +
-                    h2h * 0.6 +
+                    xg_diff * 1.5 +
+                    xpts_diff * 1.0 +     # unlucky teams due results
+                    form_diff * 0.7 +     # form boosted
+                    table_diff * 0.5 +    # table position matters
+                    h2h * 0.8 +
                     ppda_bonus
                 )
 
-                # Confidence & stars - pure win picks only
-                if final_strength >= 0.50:
+                # Debug logging — see why each match scores low/high
+                logging.info(f"{home_name} vs {away_name} | strength: {final_strength:.2f} | xG_diff: {xg_diff:.2f} | xPTS_diff: {xpts_diff:.2f} | form_diff: {form_diff} | table_diff: {table_diff} | H2H: {h2h:.1f} | PPDA_bonus: {ppda_bonus:.2f}")
+
+                # Confidence & stars — pure win picks only
+                if final_strength >= 0.45:
                     confidence = "High"
                     stars = "⭐⭐⭐"
-                elif final_strength >= 0.25:
+                elif final_strength >= 0.20:
                     confidence = "Medium"
                     stars = "⭐⭐"
-                elif final_strength >= 0.08:  # Lowered threshold to capture more
+                elif final_strength >= 0.05:  # Very low skip threshold
                     confidence = "Low"
                     stars = "⭐"
                 else:
@@ -453,10 +458,10 @@ def generate_gw_accumulator(db, top_n=6):  # Increased to 6 for more options
                 logging.error(f"Accumulator error for {home_name} vs {away_name}: {e}")
                 continue
 
-        # Enforce minimum 4 picks: if fewer qualified, force top 4-6 fallback win picks
-        if len(accumulator) < 4 and upcoming:
+        # Enforce minimum 5 picks
+        if len(accumulator) < 5 and upcoming:
             logging.info(f"Only {len(accumulator)} strong bets — forcing top {min(6, len(upcoming))} fallback win picks")
-            remaining_needed = 4 - len(accumulator)
+            remaining_needed = 5 - len(accumulator)
             fallback_matches = upcoming[len(accumulator): len(accumulator) + remaining_needed + 2]
             for f in fallback_matches:
                 home_name = f['team_h_name']
