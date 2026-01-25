@@ -25,9 +25,30 @@ PL_TOURNAMENT_ID = 17
 PL_SEASON_ID = 76986
 
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.sofascore.com/",
-    "Origin": "https://www.sofascore.com"
+    "Origin": "https://www.sofascore.com",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Ch-Ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
+TEAM_NAME_MAP = {
+    "Brighton": "Brighton & Hove Albion",
+    "Nott'm Forest": "Nottingham Forest",
+    "Spurs": "Tottenham",
+    "Leeds United": "Leeds",
+    "Ipswich": "Ipswich",
+    "Leicester": "Leicester",
+    "Brentford": "Brentford",
+    "Nottingham Forest": "Nottingham Forest",
 }
 
 # --- MONGO HELPER ---
@@ -47,7 +68,7 @@ def save_standings_to_mongo(db, rows):
             "team_id": team["id"],
             "team_name": team["name"],
             "position": row["position"],
-            "played": row["matches"],
+            "played": row["played"],
             "wins": row["wins"],
             "draws": row["draws"],
             "losses": row["losses"],
@@ -62,8 +83,8 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.utcnow(),  # FIXED: Added comma
-            "ppda_avg": row.get("ppda_avg", 20.0),  # FIXED: Added comma
+            "updated_at": datetime.now(timezone.utc),
+            "ppda_avg": row.get("ppda_avg", 20.0),
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
         }
@@ -75,8 +96,8 @@ def fetch_sofascore_lineup(match_id, retries=2):
     for attempt in range(retries):
         try:
             res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+            logging.info(f"SofaScore lineup status: {res.status_code}, content: {res.text[:200]}...")  # Log partial response for debug
             if res.status_code != 200:
-                logging.warning(f"SofaScore returned {res.status_code}")
                 time.sleep(2)
                 continue
             data = res.json()
@@ -96,7 +117,7 @@ def fetch_sofascore_lineup(match_id, retries=2):
                     })
             return players
         except Exception as e:
-            logging.error(f"SofaScore error (attempt {attempt+1}): {e}")
+            logging.error(f"SofaScore lineup error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return None
 
@@ -104,8 +125,10 @@ def get_today_sofascore_matches():
     date_str = datetime.now().strftime("%Y-%m-%d")
     url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
     try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
-        return [e for e in res.get('events', []) 
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
+        logging.info(f"SofaScore matches status: {res.status_code}, content length: {len(res.text)}")
+        data = res.json()
+        return [e for e in data.get('events', []) 
                 if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
     except Exception as e:
         logging.error(f"Error fetching matches: {e}")
@@ -305,8 +328,11 @@ def evaluate_team_result(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         if not home_data or not away_data:
             return "Skip (no data)"
@@ -337,8 +363,11 @@ def evaluate_btts(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         if not home_data or not away_data:
             return "Skip (no xG data)"
@@ -374,8 +403,11 @@ def generate_fixture_bet_builder(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_data = db.standings.find_one({"team_name": home_name})
-        away_data = db.standings.find_one({"team_name": away_name})
+        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+        
+        home_data = db.standings.find_one({"team_name": home_ustat})
+        away_data = db.standings.find_one({"team_name": away_ustat})
         
         result = evaluate_team_result(fixture, db)
         builder.append(f"• Result: {result}")
@@ -413,6 +445,10 @@ def generate_gw_accumulator(db, top_n=6):
             'event': {'$ne': None}
         }).sort('kickoff_time', 1))
         
+        if upcoming:
+            next_event = min(f['event'] for f in upcoming if f['event'] is not None)
+            upcoming = [f for f in upcoming if f['event'] == next_event]
+        
         accumulator = []
         
         for f in upcoming:
@@ -422,8 +458,11 @@ def generate_gw_accumulator(db, top_n=6):
                 home_id = f['team_h']
                 away_id = f['team_a']
                 
-                home_stand = db.standings.find_one({"team_name": home_name})
-                away_stand = db.standings.find_one({"team_name": away_name})
+                home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
+                away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
+                
+                home_stand = db.standings.find_one({"team_name": home_ustat})
+                away_stand = db.standings.find_one({"team_name": away_ustat})
                 
                 if not home_stand or not away_stand:
                     continue
@@ -525,20 +564,28 @@ def run_monitor():
             client, db = get_db()
             now = datetime.now(timezone.utc)
             
+            sofa_events = get_today_sofascore_matches()
+            logging.info(f"Fetched {len(sofa_events)} SofaScore events")
+            
             for f in db.fixtures.find({'kickoff_time': {'$exists': True}, 'finished': False, 'alert_sent': {'$ne': True}}):
                 ko = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
                 diff_mins = (ko - now).total_seconds() / 60
                 
-                if 59 <= diff_mins <= 61:
+                if -60 <= diff_mins <= 61:
                     logging.info(f"Checking: {f['team_h_name']} vs {f['team_a_name']}")
-                    sofa_events = get_today_sofascore_matches()
+                    home_sofa = TEAM_NAME_MAP.get(f['team_h_name'], f['team_h_name'])
+                    away_sofa = TEAM_NAME_MAP.get(f['team_a_name'], f['team_a_name'])
                     target_event = next((e for e in sofa_events 
-                                       if f['team_h_name'] in e.get('homeTeam', {}).get('name', '') 
-                                       or f['team_a_name'] in e.get('awayTeam', {}).get('name', '')), None)
+                                        if home_sofa == e.get('homeTeam', {}).get('name', '') 
+                                        and away_sofa == e.get('awayTeam', {}).get('name', '')), None)
+                    
+                    if target_event is None:
+                        logging.warning(f"No matching SofaScore event for {f['team_h_name']} vs {f['team_a_name']}")
                     
                     msg_parts = [f"📢 *Lineups Out: {f['team_h_name']} vs {f['team_a_name']}*"]
                     
                     if target_event:
+                        logging.info(f"Matched {f['team_h_name']} vs {f['team_a_name']} to Sofa ID {target_event['id']}")
                         sofa_lineup = fetch_sofascore_lineup(target_event['id'])
                         if sofa_lineup:
                             db.tactical_data.update_one(
@@ -589,8 +636,7 @@ async def start(update: Update, context: CallbackContext):
         "/builder - Bet builder\n"
         "/gw_accumulator - Top bets\n"
         "/status - Bot status\n"
-        "/update_standings - Update xG data\n"
-        "/test_lineups - Test SofaScore lineup fetch",
+        "/update_standings - Update xG data",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(show_fixture_menu(db))
     )
@@ -705,44 +751,6 @@ async def status(update: Update, context: CallbackContext):
     )
     client.close()
 
-async def test_lineups(update: Update, context: CallbackContext):
-    """Test lineup fetching from SofaScore"""
-    await update.message.reply_text("🔍 Testing SofaScore lineup fetch...")
-    client, db = get_db()
-    
-    try:
-        # Get today's matches
-        events = get_today_sofascore_matches()
-        await update.message.reply_text(f"Found {len(events)} PL matches today from SofaScore")
-        
-        if not events:
-            await update.message.reply_text("⚠️ No PL matches found for today. SofaScore API might be empty or date mismatch.")
-            client.close()
-            return
-        
-        # Try to fetch lineup for first match
-        test_event = events[0]
-        await update.message.reply_text(
-            f"Testing: {test_event['homeTeam']['name']} vs {test_event['awayTeam']['name']}\n"
-            f"Match ID: {test_event['id']}"
-        )
-        
-        lineup = fetch_sofascore_lineup(test_event['id'])
-        
-        if lineup:
-            await update.message.reply_text(
-                f"✅ Success! Fetched {len(lineup)} players\n\n"
-                f"Sample: {lineup[0]['name']} ({lineup[0]['team']}) - {lineup[0]['tactical_pos']}"
-            )
-        else:
-            await update.message.reply_text("❌ No lineup data returned. Lineups might not be posted yet.")
-        
-    except Exception as e:
-        logging.error(f"Test lineups error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-    finally:
-        client.close()
-
 async def update_standings_command(update: Update, context: CallbackContext):
     client, db = get_db()
     try:
@@ -792,7 +800,6 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("gw_accumulator", gw_accumulator))
     application.add_handler(CommandHandler("update_standings", update_standings_command))
-    application.add_handler(CommandHandler("test_lineups", test_lineups))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     
     threading.Thread(target=run_monitor, daemon=True).start()
