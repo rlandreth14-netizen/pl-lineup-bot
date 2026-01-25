@@ -20,30 +20,14 @@ logging.basicConfig(level=logging.INFO)
 MONGODB_URI = os.getenv('MONGODB_URI')
 TELEGRAM_TOKEN = os.getenv('BOT_TOKEN')
 HIGH_OWNERSHIP_THRESHOLD = 16.0
-SOFASCORE_BASE_URL = "https://www.sofascore.com"
-PL_SLUG = "football/england/premier-league"
+SOFASCORE_BASE_URL = "https://api.sofascore.com/api/v1"
+PL_TOURNAMENT_ID = 17
+PL_SEASON_ID = 76986
 
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://www.sofascore.com/",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
-
-TEAM_NAME_MAP = {
-    "Brighton": "Brighton & Hove Albion",
-    "Nott'm Forest": "Forest",
-    "Spurs": "Tottenham",
-    "Leeds United": "Leeds",
-    "Ipswich": "Ipswich",
-    "Leicester": "Leicester",
-    "Brentford": "Brentford",
-    "Nottingham Forest": "Forest",
+    "Origin": "https://www.sofascore.com"
 }
 
 # --- MONGO HELPER ---
@@ -63,7 +47,7 @@ def save_standings_to_mongo(db, rows):
             "team_id": team["id"],
             "team_name": team["name"],
             "position": row["position"],
-            "played": row["played"],
+            "played": row["matches"],
             "wins": row["wins"],
             "draws": row["draws"],
             "losses": row["losses"],
@@ -78,62 +62,51 @@ def save_standings_to_mongo(db, rows):
             "xG_recent": row.get("xG_recent", 0.0),
             "xGA_recent": row.get("xGA_recent", 0.0),
             "xPTS_recent": row.get("xPTS_recent", 0.0),
-            "updated_at": datetime.now(timezone.utc),
-            "ppda_avg": row.get("ppda_avg", 20.0),
+            "updated_at": datetime.utcnow(),  # FIXED: Added comma
+            "ppda_avg": row.get("ppda_avg", 20.0),  # FIXED: Added comma
             "home_xG_pg": row.get("home_xG_pg", 1.0),
             "away_xG_pg": row.get("away_xG_pg", 1.0),
         }
         collection.insert_one(doc)
 
 # --- SOFASCORE FUNCTIONS ---
-def fetch_sofascore_lineup(match_url, retries=2):
+def fetch_sofascore_lineup(match_id, retries=2):
+    url = f"{SOFASCORE_BASE_URL}/event/{match_id}/lineups"
     for attempt in range(retries):
         try:
-            res = requests.get(match_url, headers=SOFASCORE_HEADERS, timeout=10)
+            res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
             if res.status_code != 200:
                 logging.warning(f"SofaScore returned {res.status_code}")
                 time.sleep(2)
                 continue
-            soup = BeautifulSoup(res.text, 'html.parser')
+            data = res.json()
             players = []
-            lineup_containers = soup.find_all('div', {'data-testid': 'lineup-player'})
-            for player_div in lineup_containers:
-                name_div = player_div.find('div', {'data-testid': 'lineup-player-name'})
-                name = name_div.text.strip() if name_div else 'Unknown'
-                # Tactical position is not directly in a data-testid, but can be inferred from class or parent
-                pos = 'Unknown'  # Placeholder; inspect for better
-                team = 'Home' if 'home' in player_div.parent.get('class', []) else 'Away'
-                players.append({
-                    "name": name,
-                    "tactical_pos": pos,
-                    "team": team
-                })
+            for side in ['home', 'away']:
+                team_data = data.get(side)
+                if not team_data: continue
+                team_name = team_data['team']['name']
+                for entry in team_data.get('players', []):
+                    p = entry.get('player')
+                    if not p: continue
+                    players.append({
+                        "name": p.get('name', 'Unknown'),
+                        "sofa_id": p.get('id'),
+                        "tactical_pos": entry.get('position', 'Unknown'),
+                        "team": team_name
+                    })
             return players
         except Exception as e:
-            logging.error(f"SofaScore scrape error (attempt {attempt+1}): {e}")
+            logging.error(f"SofaScore error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return None
 
 def get_today_sofascore_matches():
-    url = f"{SOFASCORE_BASE_URL}/{PL_SLUG}"
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date_str}"
     try:
-        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10)
-        logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
-        soup = BeautifulSoup(res.text, 'html.parser')
-        events = []
-        event_links = soup.find_all('a', {'data-testid': 'event_link'})
-        for link in event_links:
-            home_team = link.find('div', {'data-testid': 'home_team_name'}).text.strip() if link.find('div', {'data-testid': 'home_team_name'}) else ''
-            away_team = link.find('div', {'data-testid': 'away_team_name'}).text.strip() if link.find('div', {'data-testid': 'away_team_name'}) else ''
-            match_url = SOFASCORE_BASE_URL + link.get('href')
-            match_id = match_url.split('#id:')[-1].split(',')[0] if '#id:' in match_url else None
-            events.append({
-                'homeTeam': {'name': home_team},
-                'awayTeam': {'name': away_team},
-                'match_url': match_url,
-                'id': match_id
-            })
-        return events
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=10).json()
+        return [e for e in res.get('events', []) 
+                if e.get('tournament', {}).get('uniqueTournament', {}).get('id') == PL_TOURNAMENT_ID]
     except Exception as e:
         logging.error(f"Error fetching matches: {e}")
         return []
@@ -332,11 +305,8 @@ def evaluate_team_result(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
-        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
-        
-        home_data = db.standings.find_one({"team_name": home_ustat})
-        away_data = db.standings.find_one({"team_name": away_ustat})
+        home_data = db.standings.find_one({"team_name": home_name})
+        away_data = db.standings.find_one({"team_name": away_name})
         
         if not home_data or not away_data:
             return "Skip (no data)"
@@ -367,11 +337,8 @@ def evaluate_btts(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
-        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
-        
-        home_data = db.standings.find_one({"team_name": home_ustat})
-        away_data = db.standings.find_one({"team_name": away_ustat})
+        home_data = db.standings.find_one({"team_name": home_name})
+        away_data = db.standings.find_one({"team_name": away_name})
         
         if not home_data or not away_data:
             return "Skip (no xG data)"
@@ -407,11 +374,8 @@ def generate_fixture_bet_builder(fixture, db):
         home_name = fixture['team_h_name']
         away_name = fixture['team_a_name']
         
-        home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
-        away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
-        
-        home_data = db.standings.find_one({"team_name": home_ustat})
-        away_data = db.standings.find_one({"team_name": away_ustat})
+        home_data = db.standings.find_one({"team_name": home_name})
+        away_data = db.standings.find_one({"team_name": away_name})
         
         result = evaluate_team_result(fixture, db)
         builder.append(f"• Result: {result}")
@@ -449,10 +413,6 @@ def generate_gw_accumulator(db, top_n=6):
             'event': {'$ne': None}
         }).sort('kickoff_time', 1))
         
-        if upcoming:
-            next_event = min(f['event'] for f in upcoming if f['event'] is not None)
-            upcoming = [f for f in upcoming if f['event'] == next_event]
-        
         accumulator = []
         
         for f in upcoming:
@@ -462,11 +422,8 @@ def generate_gw_accumulator(db, top_n=6):
                 home_id = f['team_h']
                 away_id = f['team_a']
                 
-                home_ustat = TEAM_NAME_MAP.get(home_name, home_name)
-                away_ustat = TEAM_NAME_MAP.get(away_name, away_name)
-                
-                home_stand = db.standings.find_one({"team_name": home_ustat})
-                away_stand = db.standings.find_one({"team_name": away_ustat})
+                home_stand = db.standings.find_one({"team_name": home_name})
+                away_stand = db.standings.find_one({"team_name": away_name})
                 
                 if not home_stand or not away_stand:
                     continue
@@ -568,28 +525,20 @@ def run_monitor():
             client, db = get_db()
             now = datetime.now(timezone.utc)
             
-            sofa_events = get_today_sofascore_matches()
-            logging.info(f"Fetched {len(sofa_events)} SofaScore events")
-            
             for f in db.fixtures.find({'kickoff_time': {'$exists': True}, 'finished': False, 'alert_sent': {'$ne': True}}):
                 ko = datetime.fromisoformat(f['kickoff_time'].replace('Z', '+00:00'))
                 diff_mins = (ko - now).total_seconds() / 60
                 
-                if -60 <= diff_mins <= 61:
+                if 59 <= diff_mins <= 61:
                     logging.info(f"Checking: {f['team_h_name']} vs {f['team_a_name']}")
-                    home_sofa = TEAM_NAME_MAP.get(f['team_h_name'], f['team_h_name'])
-                    away_sofa = TEAM_NAME_MAP.get(f['team_a_name'], f['team_a_name'])
+                    sofa_events = get_today_sofascore_matches()
                     target_event = next((e for e in sofa_events 
-                                        if home_sofa == e.get('homeTeam', {}).get('name', '') 
-                                        and away_sofa == e.get('awayTeam', {}).get('name', '')), None)
-                    
-                    if target_event is None:
-                        logging.warning(f"No matching SofaScore event for {f['team_h_name']} vs {f['team_a_name']}")
+                                       if f['team_h_name'] in e.get('homeTeam', {}).get('name', '') 
+                                       or f['team_a_name'] in e.get('awayTeam', {}).get('name', '')), None)
                     
                     msg_parts = [f"📢 *Lineups Out: {f['team_h_name']} vs {f['team_a_name']}*"]
                     
                     if target_event:
-                        logging.info(f"Matched {f['team_h_name']} vs {f['team_a_name']} to Sofa ID {target_event['id']}")
                         sofa_lineup = fetch_sofascore_lineup(target_event['id'])
                         if sofa_lineup:
                             db.tactical_data.update_one(
@@ -699,7 +648,7 @@ async def update_data(update: Update, context: CallbackContext):
         
         today_events = get_today_sofascore_matches()
         for event in today_events:
-            sofa_lineup = fetch_sofascore_lineup(event['match_url'])
+            sofa_lineup = fetch_sofascore_lineup(event['id'])
             if sofa_lineup:
                 db.tactical_data.update_one(
                     {"match_id": event['id']},
