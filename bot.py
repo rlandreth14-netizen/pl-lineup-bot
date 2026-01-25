@@ -42,6 +42,8 @@ TEAM_NAME_MAP = {
     "Leeds United": "Leeds",
     "Ipswich": "Ipswich",
     "Leicester": "Leicester",
+    "Brentford": "Brentford",
+    "Nottingham Forest": "Forest",
 }
 
 # --- MONGO HELPER ---
@@ -94,12 +96,13 @@ def fetch_sofascore_lineup(match_url, retries=2):
                 continue
             soup = BeautifulSoup(res.text, 'html.parser')
             players = []
-            # Find lineup containers - adjust based on actual classes (inspect page)
-            lineup_containers = soup.find_all('div', {'data-testid': 'lineups_player'})
+            lineup_containers = soup.find_all('div', {'data-testid': 'lineup-player'})
             for player_div in lineup_containers:
-                name = player_div.find('div', {'data-testid': 'lineups_player_name'}).text.strip() if player_div.find('div', {'data-testid': 'lineups_player_name'}) else 'Unknown'
-                pos = player_div.find('div', {'data-testid': 'lineups_player_position'}).text.strip() if player_div.find('div', {'data-testid': 'lineups_player_position'}) else 'Unknown'
-                team = 'Home' if 'home' in player_div.parent.get('class', []) else 'Away'  # Adjust based on structure
+                name_div = player_div.find('div', {'data-testid': 'lineup-player-name'})
+                name = name_div.text.strip() if name_div else 'Unknown'
+                # Tactical position is not directly in a data-testid, but can be inferred from class or parent
+                pos = 'Unknown'  # Placeholder; inspect for better
+                team = 'Home' if 'home' in player_div.parent.get('class', []) else 'Away'
                 players.append({
                     "name": name,
                     "tactical_pos": pos,
@@ -118,11 +121,11 @@ def get_today_sofascore_matches():
         logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
         soup = BeautifulSoup(res.text, 'html.parser')
         events = []
-        match_cards = soup.find_all('a', {'data-testid': 'event_link'})  # Adjust selector
-        for card in match_cards:
-            home_team = card.find('div', {'data-testid': 'home_team_name'}).text.strip() if card.find('div', {'data-testid': 'home_team_name'}) else ''
-            away_team = card.find('div', {'data-testid': 'away_team_name'}).text.strip() if card.find('div', {'data-testid': 'away_team_name'}) else ''
-            match_url = SOFASCORE_BASE_URL + card.get('href')
+        event_links = soup.find_all('a', {'data-testid': 'event_link'})
+        for link in event_links:
+            home_team = link.find('div', {'data-testid': 'home_team_name'}).text.strip() if link.find('div', {'data-testid': 'home_team_name'}) else ''
+            away_team = link.find('div', {'data-testid': 'away_team_name'}).text.strip() if link.find('div', {'data-testid': 'away_team_name'}) else ''
+            match_url = SOFASCORE_BASE_URL + link.get('href')
             match_id = match_url.split('#id:')[-1].split(',')[0] if '#id:' in match_url else None
             events.append({
                 'homeTeam': {'name': home_team},
@@ -696,7 +699,7 @@ async def update_data(update: Update, context: CallbackContext):
         
         today_events = get_today_sofascore_matches()
         for event in today_events:
-            sofa_lineup = fetch_sofascore_lineup(event['id'])
+            sofa_lineup = fetch_sofascore_lineup(event['match_url'])
             if sofa_lineup:
                 db.tactical_data.update_one(
                     {"match_id": event['id']},
