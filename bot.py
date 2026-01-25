@@ -589,7 +589,8 @@ async def start(update: Update, context: CallbackContext):
         "/builder - Bet builder\n"
         "/gw_accumulator - Top bets\n"
         "/status - Bot status\n"
-        "/update_standings - Update xG data",
+        "/update_standings - Update xG data\n"
+        "/test_lineups - Test SofaScore lineup fetch",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(show_fixture_menu(db))
     )
@@ -704,6 +705,44 @@ async def status(update: Update, context: CallbackContext):
     )
     client.close()
 
+async def test_lineups(update: Update, context: CallbackContext):
+    """Test lineup fetching from SofaScore"""
+    await update.message.reply_text("🔍 Testing SofaScore lineup fetch...")
+    client, db = get_db()
+    
+    try:
+        # Get today's matches
+        events = get_today_sofascore_matches()
+        await update.message.reply_text(f"Found {len(events)} PL matches today from SofaScore")
+        
+        if not events:
+            await update.message.reply_text("⚠️ No PL matches found for today. SofaScore API might be empty or date mismatch.")
+            client.close()
+            return
+        
+        # Try to fetch lineup for first match
+        test_event = events[0]
+        await update.message.reply_text(
+            f"Testing: {test_event['homeTeam']['name']} vs {test_event['awayTeam']['name']}\n"
+            f"Match ID: {test_event['id']}"
+        )
+        
+        lineup = fetch_sofascore_lineup(test_event['id'])
+        
+        if lineup:
+            await update.message.reply_text(
+                f"✅ Success! Fetched {len(lineup)} players\n\n"
+                f"Sample: {lineup[0]['name']} ({lineup[0]['team']}) - {lineup[0]['tactical_pos']}"
+            )
+        else:
+            await update.message.reply_text("❌ No lineup data returned. Lineups might not be posted yet.")
+        
+    except Exception as e:
+        logging.error(f"Test lineups error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+    finally:
+        client.close()
+
 async def update_standings_command(update: Update, context: CallbackContext):
     client, db = get_db()
     try:
@@ -753,6 +792,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("gw_accumulator", gw_accumulator))
     application.add_handler(CommandHandler("update_standings", update_standings_command))
+    application.add_handler(CommandHandler("test_lineups", test_lineups))
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     
     threading.Thread(target=run_monitor, daemon=True).start()
