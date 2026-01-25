@@ -94,18 +94,17 @@ def fetch_sofascore_lineup(match_url, retries=2):
                 continue
             soup = BeautifulSoup(res.text, 'html.parser')
             players = []
-            # Scrape lineup sections - adjust selectors based on page structure
-            lineup_sections = soup.find_all('div', class_='lineup-section')  # Example selector; inspect page for accurate class
-            for section in lineup_sections:
-                team_name = section.find('div', class_='team-name').text.strip() if section.find('div', class_='team-name') else 'Unknown'
-                for player_div in section.find_all('div', class_='player'):
-                    name = player_div.find('span', class_='player-name').text.strip() if player_div.find('span', class_='player-name') else 'Unknown'
-                    pos = player_div.find('span', class_='player-position').text.strip() if player_div.find('span', class_='player-position') else 'Unknown'
-                    players.append({
-                        "name": name,
-                        "tactical_pos": pos,
-                        "team": team_name
-                    })
+            # Find lineup containers - adjust based on actual classes (inspect page)
+            lineup_containers = soup.find_all('div', {'data-testid': 'lineups_player'})
+            for player_div in lineup_containers:
+                name = player_div.find('div', {'data-testid': 'lineups_player_name'}).text.strip() if player_div.find('div', {'data-testid': 'lineups_player_name'}) else 'Unknown'
+                pos = player_div.find('div', {'data-testid': 'lineups_player_position'}).text.strip() if player_div.find('div', {'data-testid': 'lineups_player_position'}) else 'Unknown'
+                team = 'Home' if 'home' in player_div.parent.get('class', []) else 'Away'  # Adjust based on structure
+                players.append({
+                    "name": name,
+                    "tactical_pos": pos,
+                    "team": team
+                })
             return players
         except Exception as e:
             logging.error(f"SofaScore scrape error (attempt {attempt+1}): {e}")
@@ -119,15 +118,16 @@ def get_today_sofascore_matches():
         logging.info(f"SofaScore status: {res.status_code}, content length: {len(res.text)}")
         soup = BeautifulSoup(res.text, 'html.parser')
         events = []
-        # Scrape today's matches - adjust selectors
-        match_cards = soup.find_all('div', class_='match-card')  # Example selector
+        match_cards = soup.find_all('a', {'data-testid': 'event_link'})  # Adjust selector
         for card in match_cards:
-            home_team = card.find('div', class_='home-team').text.strip() if card.find('div', class_='home-team') else ''
-            away_team = card.find('div', class_='away-team').text.strip() if card.find('div', class_='away-team') else ''
-            match_id = card.get('data-id') or card.find('a', class_='match-link').get('href').split('/')[-1] if card.find('a', class_='match-link') else None
+            home_team = card.find('div', {'data-testid': 'home_team_name'}).text.strip() if card.find('div', {'data-testid': 'home_team_name'}) else ''
+            away_team = card.find('div', {'data-testid': 'away_team_name'}).text.strip() if card.find('div', {'data-testid': 'away_team_name'}) else ''
+            match_url = SOFASCORE_BASE_URL + card.get('href')
+            match_id = match_url.split('#id:')[-1].split(',')[0] if '#id:' in match_url else None
             events.append({
                 'homeTeam': {'name': home_team},
                 'awayTeam': {'name': away_team},
+                'match_url': match_url,
                 'id': match_id
             })
         return events
